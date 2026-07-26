@@ -933,6 +933,11 @@ test also passed. The disposable-repository live approval gate remains opt-in.
 
 ### M3 — Reviewer handoff
 
+The proposed safety and UX decisions for the first M3 slice are recorded in
+`docs/M3_REVIEW_HANDOFF_DECISIONS.md`. Implementation remains gated on approval
+of writer-lease revocation, the exact bounded diff envelope, and the explicit
+single-reviewer mechanism/fallback policy.
+
 - Review envelope generated from task, criteria, base, and diff.
 - Scout/architect handoff packet with objective, constraints, relevant files, open questions, and acceptance criteria.
 - Structured findings view.
