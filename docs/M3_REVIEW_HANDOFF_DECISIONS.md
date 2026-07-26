@@ -71,8 +71,9 @@ exact bounded unified diff, byte size, SHA-256, and truncation state
 - The confirmation modal names the exact mechanism: `Codex native review`,
   `Codex generic read-only turn`, or `Claude generic read-only turn`.
 - Codex native review is offered only when the local runtime probe confirms its
-  required flags and a credential-free fake-CLI test validates read-only
-  invocation. It is never selected by silent fallback.
+  required app-server request and response schema, and a credential-free fake
+  app-server test validates read-only invocation. It is never selected by
+  silent fallback.
 - If native review is unavailable, the user may explicitly choose the generic
   Codex read-only mechanism. Claude uses a generic read-only Agent SDK turn in
   this slice; it is not presented as equivalent to a provider-native review.
@@ -151,9 +152,16 @@ permission requests, validates bounded structured findings, detects workspace
 drift, previews valid file/line locations read-only, and returns only selected
 findings through a user-controlled relay.
 
-Sixty-four credential-free tests, type checking, bundle compilation, and
-standalone compilation pass without a provider model turn. Codex native
-`review/start` remains unavailable in the UI until its structured event and
-cancellation contract is covered by a version-matched fake app-server fixture.
-Two-lens and scout/architect handoffs remain later M3 increments, so the overall
-M3 milestone is not yet marked complete.
+The second offline M3 slice adds a credential-free runtime schema probe for
+Codex `review/start`, a visible `preview` stability label, an explicit native or
+generic mechanism selector, and a native adapter path that does not extend the
+read-only thread sandbox. Its redacted Codex 0.145 schema capture and fake
+app-server cover normal streaming, a notification arriving before the response,
+deny-only file-change approval, cancellation, and malformed requests. The probe
+generates local schemas only and never starts a model turn.
+
+Sixty-eight credential-free tests, type checking, bundle compilation,
+standalone compilation, Linux x86_64 cross-compilation, and clean-checkout
+packaging pass without a provider model turn. Two-lens and scout/architect
+handoffs remain later M3 increments, so the overall M3 milestone is not yet
+marked complete.

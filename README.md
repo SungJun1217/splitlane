@@ -61,10 +61,13 @@ confirmation requires acceptance criteria, freezes an exact patch up to 200
 KiB, and revokes the writer lease before dispatching to the other provider in
 read-only mode. Findings retain provider attribution and file/line locations.
 Returning selected findings prepares the shared prompt and reopens normal writer
-promotion; it never sends a fix prompt automatically. Codex native review is not
-enabled in this slice because its structured app-server path still needs a
-version-matched fake-CLI contract test; the UI labels the active mechanism as a
-generic read-only review.
+promotion; it never sends a fix prompt automatically. When the installed Codex
+app-server schema exposes the required `review/start` contract, Splitlane offers
+that mechanism as a visible `preview` and keeps the generic read-only turn as an
+explicit alternative. Press `Tab` in the confirmation modal to switch. If the
+runtime probe fails, only the generic mechanism is shown; Splitlane never starts
+a model turn while probing and never silently substitutes one mechanism after
+confirmation.
 
 ## Verify without credentials or model cost
 

@@ -1,0 +1,39 @@
+{
+  "fixture_version": 1,
+  "captured_from": "codex-cli 0.145.0 generated stable app-server schema",
+  "model_turn_started": false,
+  "schema_markers": [
+    "\"review/start\"",
+    "\"ReviewStartParams\"",
+    "\"CustomReviewTarget\"",
+    "\"reviewThreadId\""
+  ],
+  "request": {
+    "id": 7,
+    "method": "review/start",
+    "params": {
+      "threadId": "<opaque-id>",
+      "delivery": "inline",
+      "target": {
+        "type": "custom",
+        "instructions": "<bounded-review-envelope>"
+      }
+    }
+  },
+  "response": {
+    "id": 7,
+    "result": {
+      "reviewThreadId": "<opaque-id>",
+      "turn": {
+        "id": "<opaque-id>",
+        "status": "inProgress"
+      }
+    }
+  },
+  "stream_methods": [
+    "turn/started",
+    "item/agentMessage/delta",
+    "turn/completed"
+  ],
+  "cancellation_method": "turn/interrupt"
+}

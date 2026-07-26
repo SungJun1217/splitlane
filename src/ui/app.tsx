@@ -25,6 +25,7 @@ const ACTIONS = [
   ["claude.plan_mode", "stable", "Read-only planning (active)"],
   ["claude.agent_sdk_write", "stable", "Sandboxed build with temporary approvals"],
   ["codex.app_server", "preview", "Streaming + lane approvals"],
+  ["codex.native_review", "preview", "Capability-gated app-server review/start"],
   ["codex.workspace_write", "preview", "Workspace-write build with network off"],
 ] as const;
 
@@ -69,7 +70,7 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
     return (
       <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
         <Text bold>FINDINGS · READ ONLY</Text>
-        <Text dimColor>{review.reviewer} · {review.mechanism} · {review.envelope.diffHash.slice(0, 8)} · {review.stale ? "STALE" : "CURRENT"}</Text>
+        <Text dimColor>{review.reviewer} · {review.mechanism} [{review.envelope.mechanismStability}] · {review.envelope.diffHash.slice(0, 8)} · {review.stale ? "STALE" : "CURRENT"}</Text>
         <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
       </Box>
     );
@@ -175,13 +176,14 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
     return (
       <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
         <Text bold>START REVIEW · REVOKE WRITER THEN READ ONLY</Text>
-        <Text>{review.writer.toUpperCase()} → {review.reviewer.toUpperCase()} · {review.mechanism}</Text>
+        <Text>{review.writer.toUpperCase()} → {review.reviewer.toUpperCase()} · {review.mechanism} [{review.envelope.mechanismStability}]</Text>
+        <Text dimColor>available: {review.availableMechanisms.join(" · ")}</Text>
         <Text>base: {review.envelope.head.slice(0, 12)} · diff {review.envelope.diffBytes} bytes · {review.envelope.diffHash.slice(0, 12)}</Text>
         <Text>files: {files}{review.envelope.files.length > 5 ? ` (+${review.envelope.files.length - 5} more)` : ""}</Text>
         <Text>objective: {tailLines(review.envelope.objective, 2)}</Text>
         <Text>acceptance criteria: <Text color="cyan">{reviewCriteria || " "}</Text></Text>
         <Text color="yellow">Enter revokes the writer lease before dispatch. Network and writes stay off.</Text>
-        <Text dimColor>Type criteria · Enter start · Esc keep build</Text>
+        <Text dimColor>Type criteria · Tab mechanism · Enter start · Esc keep build</Text>
       </Box>
     );
   }
@@ -359,7 +361,12 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       return;
     }
     if (overlay === "review") {
-      if (key.return) {
+      if (key.tab && snapshot.review) {
+        const mechanisms = snapshot.review.availableMechanisms;
+        const index = mechanisms.indexOf(snapshot.review.mechanism);
+        const next = mechanisms[(index + 1) % mechanisms.length];
+        if (next) orchestrator.setReviewMechanism(next);
+      } else if (key.return) {
         void orchestrator.startReview(reviewCriteria).then((started) => { if (started) setOverlay(null); });
       } else if (key.backspace || key.delete) setReviewCriteria(removeLastGrapheme(reviewCriteria));
       else if (!key.ctrl && !key.meta) setReviewCriteria((current) => current + input);

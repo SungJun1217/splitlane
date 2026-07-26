@@ -1,11 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readlink } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import type { GitFileEvidence, ProviderId, ReviewEnvelope, ReviewMechanism } from "../domain.ts";
+import type { CapabilityStability, GitFileEvidence, ProviderId, ReviewEnvelope, ReviewMechanism } from "../domain.ts";
 import { runCommand } from "../process/child.ts";
 import { sanitizeTerminalText } from "../terminal/sanitize.ts";
 
 export const REVIEW_PATCH_LIMIT = 200 * 1024;
+
+export function reviewMechanismStability(mechanism: ReviewMechanism): CapabilityStability {
+  return mechanism === "codex_native" ? "preview" : "stable";
+}
 
 export interface ReviewPatch {
   branch: string;
@@ -127,6 +131,7 @@ export function createReviewEnvelope(input: {
     writer: input.writer,
     reviewer: input.reviewer,
     mechanism: input.mechanism,
+    mechanismStability: reviewMechanismStability(input.mechanism),
     objective: sanitizeTerminalText(input.objective).trim(),
     acceptanceCriteria: sanitizeTerminalText(input.acceptanceCriteria).trim(),
     projectRoot: input.projectRoot,

@@ -22,7 +22,7 @@ import type {
 } from "./domain.ts";
 import { appendBounded, sanitizeTerminalText } from "./terminal/sanitize.ts";
 import { ClaudeAdapter, claudePermissionResult, parseClaudeMessage } from "./providers/claude.ts";
-import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCodexNotification } from "./providers/codex.ts";
+import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCodexNotification, supportsCodexNativeReviewSchema } from "./providers/codex.ts";
 import { CodexRpcClient } from "./providers/codex-rpc.ts";
 import { GitObserver, parseStatus } from "./git/observer.ts";
 import { SplitlaneView } from "./ui/app.tsx";
@@ -41,9 +41,13 @@ class FakeAdapter implements ProviderAdapter {
   readonly interrupted: string[] = [];
   readonly turnOptions: TurnOptions[] = [];
   readonly approvalDecisions: ApprovalDecision[] = [];
+  readonly nativeReviewPrompts: string[] = [];
+  readonly reviewMechanisms?: readonly ("claude_generic" | "codex_generic" | "codex_native")[];
   readonly #active = new Map<string, AsyncQueue<NormalizedEvent>>();
 
-  constructor(readonly provider: ProviderId, readonly scenario: Scenario = "complete") {}
+  constructor(readonly provider: ProviderId, readonly scenario: Scenario = "complete", nativeReview = false) {
+    this.reviewMechanisms = provider === "codex" && nativeReview ? ["codex_native", "codex_generic"] : [`${provider}_generic`];
+  }
 
   async probe(): Promise<ProviderProbe> {
     return { provider: this.provider, available: true, version: "fake/1", error: null };
@@ -133,6 +137,11 @@ class FakeAdapter implements ProviderAdapter {
       }
     });
     return { id, events: queue };
+  }
+
+  async startReview(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {
+    this.nativeReviewPrompts.push(prompt);
+    return this.startTurn(session, prompt, options);
   }
 
   async interrupt(turnId: string): Promise<void> {
@@ -483,6 +492,7 @@ describe("terminal rendering", () => {
         writer: "claude",
         reviewer: "codex",
         mechanism: "codex_generic",
+        availableMechanisms: ["codex_generic"],
         envelope: { ...envelope, acceptanceCriteria: "회귀 없음" },
         stale: true,
         parseError: null,
@@ -515,6 +525,7 @@ describe("terminal rendering", () => {
     );
     expect(confirmation).toContain("REVOKE WRITER THEN READ ONLY");
     expect(confirmation).toContain("회귀 없음");
+    expect(confirmation).toContain("codex_generic [stable]");
     const findings = renderToString(
       <SplitlaneView snapshot={reviewSnapshot} prompt="" columns={90} rows={30} overlay="findings" staleAcknowledged />,
       { columns: 90 },
@@ -826,6 +837,37 @@ describe("M3 reviewer handoff", () => {
     const outside = `${FINDINGS_START}{"findings":[{"id":"outside","severity":"high","title":"a","body":"a","file":"../secret"}]}${FINDINGS_END}`;
     expect(parseReviewFindings(outside, "codex", "codex_generic", process.cwd()).error).toContain("outside");
   });
+
+  test("capability-gated native Codex review is visible, selectable, and explicitly invoked", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "review_findings", true);
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Implement native-review target");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "native review\n");
+      await orchestrator.prepareReview();
+      expect(orchestrator.getSnapshot().review).toMatchObject({
+        mechanism: "codex_native",
+        availableMechanisms: ["codex_native", "codex_generic"],
+        envelope: { mechanismStability: "preview" },
+      });
+      expect(orchestrator.setReviewMechanism("codex_generic")).toBe(true);
+      expect(orchestrator.getSnapshot().review?.envelope.mechanismStability).toBe("stable");
+      expect(orchestrator.setReviewMechanism("codex_native")).toBe(true);
+      await orchestrator.startReview("Native review stays read-only");
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "completed");
+      expect(codex.nativeReviewPrompts).toHaveLength(1);
+      expect(orchestrator.getSnapshot().review?.mechanism).toBe("codex_native");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("captured provider event compatibility", () => {
@@ -976,5 +1018,81 @@ describe("captured provider event compatibility", () => {
     await waitFor(() => exitErrors.length > 0);
     expect(exitErrors[0]?.message).toContain("code=17");
     await client.close();
+  });
+
+  test("Codex native review/start streams and cancels through a fake app-server", async () => {
+    const adapter = new CodexAdapter({
+      nativeReviewAvailable: true,
+      rpcFactory: (onNotification, onServerRequest, onExit) => new CodexRpcClient(
+        onNotification,
+        onServerRequest,
+        onExit,
+        process.execPath,
+        ["test/fixtures/fake-codex-review-app-server.mjs"],
+      ),
+    });
+    const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    expect(adapter.reviewMechanisms).toEqual(["codex_native", "codex_generic"]);
+    const turn = await adapter.startReview(session, "review envelope", readOnlyTurnOptions());
+    const events: NormalizedEvent[] = [];
+    for await (const item of turn.events) events.push(item);
+    expect(events.map(({ kind }) => kind)).toEqual(["turn.started", "message.delta", "turn.completed"]);
+    expect(events.find(({ kind }) => kind === "message.delta")?.payload.text).toContain(FINDINGS_START);
+
+    const early = await adapter.startReview(session, "early-native-review", readOnlyTurnOptions());
+    const earlyEvents: NormalizedEvent[] = [];
+    for await (const item of early.events) earlyEvents.push(item);
+    expect(earlyEvents.map(({ kind }) => kind)).toEqual(["turn.started", "message.delta", "turn.completed"]);
+    expect(earlyEvents.every(({ turn_id }) => turn_id === early.id)).toBe(true);
+
+    let nativeApproval: unknown = null;
+    const approvalTurn = await adapter.startReview(session, "approval-native-review", {
+      ...readOnlyTurnOptions(),
+      requestApproval: async (request) => {
+        nativeApproval = request;
+        return "deny";
+      },
+    });
+    const approvalEvents: NormalizedEvent[] = [];
+    for await (const item of approvalTurn.events) approvalEvents.push(item);
+    expect(nativeApproval).toMatchObject({ kind: "file_change", reason: "native review must remain read-only" });
+    expect(approvalEvents.map(({ kind }) => kind)).toEqual([
+      "turn.started",
+      "approval.requested",
+      "approval.resolved",
+      "message.delta",
+      "turn.completed",
+    ]);
+
+    const held = await adapter.startReview(session, "hold-native-review", readOnlyTurnOptions());
+    await adapter.interrupt(held.id);
+    const cancelled: NormalizedEvent[] = [];
+    for await (const item of held.events) cancelled.push(item);
+    expect(cancelled.map(({ kind }) => kind)).toEqual(["turn.started", "turn.cancelled"]);
+    await adapter.close();
+  });
+
+  test("captured Codex review schema enables native review without a model turn", async () => {
+    const fixture = await Bun.file("test/fixtures/codex-m3-review-start.redacted.json").json() as {
+      model_turn_started: boolean;
+      schema_markers: string[];
+      request: { method: string; params: Record<string, unknown> };
+      cancellation_method: string;
+    };
+    expect(fixture.model_turn_started).toBe(false);
+    expect(supportsCodexNativeReviewSchema(fixture.schema_markers.join(" "))).toBe(true);
+    expect(fixture.request).toMatchObject({ method: "review/start", params: { delivery: "inline", target: { type: "custom" } } });
+    expect(fixture.request.params).not.toHaveProperty("sandboxPolicy");
+    expect(fixture.cancellation_method).toBe("turn/interrupt");
+  });
+
+  test("Codex runtime probe enables native review only after local schema generation", async () => {
+    const adapter = new CodexAdapter({
+      command: join(process.cwd(), "test/fixtures/fake-codex-schema-cli.mjs"),
+    });
+    expect(adapter.reviewMechanisms).toEqual(["codex_generic"]);
+    expect(await adapter.probe()).toMatchObject({ available: true, version: "codex-cli 0.145.0" });
+    expect(adapter.reviewMechanisms).toEqual(["codex_native", "codex_generic"]);
+    await adapter.close();
   });
 });

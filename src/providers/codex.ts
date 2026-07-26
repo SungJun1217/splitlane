@@ -1,5 +1,8 @@
 import { AsyncQueue } from "../core/async-queue.ts";
 import { event } from "../core/events.ts";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   ApprovalDecision,
   NormalizedEvent,
@@ -11,6 +14,7 @@ import type {
   SessionOptions,
   TurnOptions,
   WorkspaceAccess,
+  ReviewMechanism,
 } from "../domain.ts";
 import { runCommand } from "../process/child.ts";
 import { sanitizeIdentifier, sanitizeTerminalText } from "../terminal/sanitize.ts";
@@ -27,6 +31,10 @@ interface TurnStartResponse {
   turn: { id: string };
 }
 
+interface ReviewStartResponse extends TurnStartResponse {
+  reviewThreadId: string;
+}
+
 interface ActiveTurn {
   threadId: string;
   turnId: string | null;
@@ -35,6 +43,43 @@ interface ActiveTurn {
   workspaceAccess: WorkspaceAccess;
   requestApproval(request: ProviderApprovalRequest): Promise<ApprovalDecision>;
   filePathsByItem: Map<string, readonly string[]>;
+}
+
+type RpcFactory = (
+  onNotification: (message: RpcMessage) => void,
+  onServerRequest: (message: RpcMessage) => void,
+  onExit: (error: Error) => void,
+) => CodexRpcClient;
+
+export interface CodexAdapterOptions {
+  command?: string;
+  appServerArgs?: readonly string[];
+  rpcFactory?: RpcFactory;
+  nativeReviewAvailable?: boolean;
+}
+
+export function supportsCodexNativeReviewSchema(schemaText: string): boolean {
+  return schemaText.includes('"review/start"') &&
+    schemaText.includes('"ReviewStartParams"') &&
+    schemaText.includes('"CustomReviewTarget"') &&
+    schemaText.includes('"reviewThreadId"');
+}
+
+async function probeNativeReview(command: string): Promise<boolean> {
+  const directory = await mkdtemp(join(tmpdir(), "splitlane-codex-review-schema-"));
+  try {
+    const result = await runCommand(command, ["app-server", "generate-json-schema", "--out", directory], {
+      timeoutMs: 15_000,
+      maxOutput: 64_000,
+    });
+    if (!result.available || result.exitCode !== 0 || result.timedOut || result.truncated) return false;
+    const schema = await readFile(join(directory, "ClientRequest.json"), "utf8");
+    return supportsCodexNativeReviewSchema(schema);
+  } catch {
+    return false;
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function params(message: RpcMessage): Record<string, unknown> {
@@ -141,10 +186,23 @@ export class CodexAdapter implements ProviderAdapter {
   #rpc: CodexRpcClient | null = null;
   #version: string | null = null;
   #projectRoot = process.cwd();
+  #nativeReviewAvailable: boolean;
+
+  constructor(readonly options: CodexAdapterOptions = {}) {
+    this.#nativeReviewAvailable = options.nativeReviewAvailable ?? false;
+  }
+
+  get reviewMechanisms(): readonly ReviewMechanism[] {
+    return this.#nativeReviewAvailable ? ["codex_native", "codex_generic"] : ["codex_generic"];
+  }
 
   async probe(): Promise<ProviderProbe> {
-    const result = await runCommand("codex", ["--version"]);
+    const command = this.options.command ?? "codex";
+    const result = await runCommand(command, ["--version"]);
     this.#version = result.available && result.exitCode === 0 ? sanitizeTerminalText(result.stdout).trim() : null;
+    if (this.#version && this.options.nativeReviewAvailable === undefined) {
+      this.#nativeReviewAvailable = await probeNativeReview(command);
+    }
     return {
       provider: this.provider,
       available: this.#version !== null,
@@ -155,11 +213,12 @@ export class CodexAdapter implements ProviderAdapter {
 
   async #ensureRpc(): Promise<CodexRpcClient> {
     if (this.#rpc) return this.#rpc;
-    const rpc = new CodexRpcClient(
-      (message) => this.#onNotification(message),
-      (message) => { void this.#onServerRequest(message); },
-      (error) => this.#onExit(error),
-    );
+    const onNotification = (message: RpcMessage) => this.#onNotification(message);
+    const onServerRequest = (message: RpcMessage) => { void this.#onServerRequest(message); };
+    const onExit = (error: Error) => this.#onExit(error);
+    const rpc = this.options.rpcFactory
+      ? this.options.rpcFactory(onNotification, onServerRequest, onExit)
+      : new CodexRpcClient(onNotification, onServerRequest, onExit, this.options.command ?? "codex", this.options.appServerArgs ?? ["app-server", "--stdio"]);
     await rpc.start();
     await rpc.request("initialize", {
       clientInfo: {
@@ -230,13 +289,66 @@ export class CodexAdapter implements ProviderAdapter {
         approvalPolicy: "untrusted",
         ...model,
       });
+      if (!response.turn?.id || (active.turnId && active.turnId !== response.turn.id)) {
+        throw new Error("Codex turn/start returned a mismatched turn ID.");
+      }
       active.turnId = response.turn.id;
       if (!active.finished) this.#activeByTurn.set(response.turn.id, active);
       return { id: response.turn.id, events: active.queue };
     } catch (error) {
       this.#activeByThread.delete(session.id);
+      if (active.turnId) this.#activeByTurn.delete(active.turnId);
       active.queue.push(event(this.provider, "turn.failed", {
         sessionId: session.id,
+        payload: { error: sanitizeTerminalText((error as Error).message) },
+        rawVersion: this.#version,
+      }));
+      active.queue.close();
+      throw error;
+    }
+  }
+
+  async startReview(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {
+    if (!this.#nativeReviewAvailable) throw new Error("Codex native review is unavailable for this runtime.");
+    if (
+      options.workspaceAccess !== "read_only" ||
+      options.writerLease !== null ||
+      options.projectRoot !== this.#projectRoot
+    ) {
+      throw new Error("Codex native review requires the matching read-only project session.");
+    }
+    const rpc = await this.#ensureRpc();
+    const active: ActiveTurn = {
+      threadId: session.id,
+      turnId: null,
+      queue: new AsyncQueue<NormalizedEvent>(),
+      finished: false,
+      workspaceAccess: "read_only",
+      requestApproval: options.requestApproval,
+      filePathsByItem: new Map(),
+    };
+    this.#activeByThread.set(session.id, active);
+    try {
+      const response = await rpc.request<ReviewStartResponse>("review/start", {
+        threadId: session.id,
+        delivery: "inline",
+        target: { type: "custom", instructions: prompt },
+      });
+      if (!response.turn?.id || !response.reviewThreadId) throw new Error("Codex review/start returned a malformed response.");
+      if (active.turnId && active.turnId !== response.turn.id) throw new Error("Codex review/start returned a mismatched turn ID.");
+      if (response.reviewThreadId !== active.threadId) {
+        this.#activeByThread.delete(active.threadId);
+        active.threadId = response.reviewThreadId;
+        if (!active.finished) this.#activeByThread.set(active.threadId, active);
+      }
+      active.turnId = response.turn.id;
+      if (!active.finished) this.#activeByTurn.set(response.turn.id, active);
+      return { id: response.turn.id, events: active.queue };
+    } catch (error) {
+      this.#activeByThread.delete(active.threadId);
+      if (active.turnId) this.#activeByTurn.delete(active.turnId);
+      active.queue.push(event(this.provider, "turn.failed", {
+        sessionId: active.threadId,
         payload: { error: sanitizeTerminalText((error as Error).message) },
         rawVersion: this.#version,
       }));
@@ -273,6 +385,15 @@ export class CodexAdapter implements ProviderAdapter {
     const active = this.#current(message);
     if (!active) return;
     const value = params(message);
+    const turn = nestedRecord(value.turn);
+    const notificationTurnId =
+      (typeof value.turnId === "string" && value.turnId) ||
+      (typeof turn.id === "string" && turn.id) ||
+      null;
+    if (!active.turnId && notificationTurnId) {
+      active.turnId = notificationTurnId;
+      this.#activeByTurn.set(notificationTurnId, active);
+    }
     const item = nestedRecord(value.item);
     if (message.method === "item/started" && item.type === "fileChange" && typeof item.id === "string") {
       const changes = Array.isArray(item.changes) ? item.changes : [];

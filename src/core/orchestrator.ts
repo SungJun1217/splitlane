@@ -15,12 +15,13 @@ import type {
   ReviewMechanism,
   ReviewSnapshot,
   SessionHandle,
+  TurnOptions,
   WriterLease,
 } from "../domain.ts";
 import { GitObserver } from "../git/observer.ts";
 import { appendBounded, sanitizeTerminalText } from "../terminal/sanitize.ts";
 import { isPathInsideWorkspace, WorkspaceGuard } from "../workspace/guard.ts";
-import { captureReviewPatch, createReviewEnvelope } from "../review/envelope.ts";
+import { captureReviewPatch, createReviewEnvelope, reviewMechanismStability } from "../review/envelope.ts";
 import { buildFindingsRelay, buildReviewPrompt, parseReviewFindings } from "../review/findings.ts";
 import { loadFindingPreview } from "../review/preview.ts";
 
@@ -292,7 +293,12 @@ export class CompareOrchestrator {
       const baselineHead = this.#git.baselineHead;
       if (!baselineHead) throw new Error("Review handoff lost its Git baseline revision.");
       const patch = await captureReviewPatch(git.root, git.evidence, { baseRevision: baselineHead });
-      const mechanism = `${reviewer}_generic` as ReviewMechanism;
+      const generic = `${reviewer}_generic` as ReviewMechanism;
+      const advertised = this.adapters[reviewer].reviewMechanisms ?? [generic];
+      const availableMechanisms = advertised.filter((mechanism) =>
+        mechanism === generic || (reviewer === "codex" && mechanism === "codex_native")
+      );
+      const mechanism = availableMechanisms.includes("codex_native") ? "codex_native" : generic;
       const envelope = createReviewEnvelope({
         writer,
         reviewer,
@@ -310,6 +316,7 @@ export class CompareOrchestrator {
           writer,
           reviewer,
           mechanism,
+          availableMechanisms: availableMechanisms.length ? availableMechanisms : [generic],
           envelope,
           findings: [],
           activeFindingId: null,
@@ -390,13 +397,31 @@ export class CompareOrchestrator {
     }
   }
 
+  setReviewMechanism(mechanism: ReviewMechanism): boolean {
+    const review = this.#snapshot.review;
+    if (!review || review.status !== "draft" || !review.availableMechanisms.includes(mechanism)) return false;
+    this.#patch({
+      review: {
+        ...review,
+        mechanism,
+        envelope: Object.freeze({
+          ...review.envelope,
+          mechanism,
+          mechanismStability: reviewMechanismStability(mechanism),
+        }),
+      },
+      notice: `Review mechanism set to ${mechanism}; no provider turn was started.`,
+    });
+    return true;
+  }
+
   async #runReview(review: ReviewSnapshot): Promise<void> {
     const envelope: PromptEnvelope = Object.freeze({
       envelopeId: review.envelope.id,
       createdAt: review.envelope.createdAt,
       prompt: buildReviewPrompt(review.envelope),
     });
-    await this.#runLane(review.reviewer, envelope);
+    await this.#runLane(review.reviewer, envelope, review.mechanism);
     if (this.#snapshot.mode !== "review" || this.#snapshot.review?.envelope.id !== review.envelope.id) return;
     let stale = true;
     try {
@@ -596,7 +621,7 @@ export class CompareOrchestrator {
     return true;
   }
 
-  async #runLane(provider: ProviderId, envelope: PromptEnvelope): Promise<void> {
+  async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism): Promise<void> {
     const adapter = this.adapters[provider];
     try {
       let session = this.#sessions.get(provider);
@@ -615,7 +640,7 @@ export class CompareOrchestrator {
           this.#workspace.validate(lease, provider)
         ? "workspace_write"
         : "read_only";
-      const turn = await adapter.startTurn(session, envelope.prompt, {
+      const turnOptions: TurnOptions = {
         requestedModel,
         projectRoot: this.projectRoot,
         workspaceAccess,
@@ -625,7 +650,13 @@ export class CompareOrchestrator {
           this.#snapshot.lanes[provider].turnId ?? "starting",
           request,
         ),
-      });
+      };
+      if (reviewMechanism === "codex_native" && !adapter.startReview) {
+        throw new Error("Selected native review mechanism is unavailable.");
+      }
+      const turn = reviewMechanism === "codex_native"
+        ? await adapter.startReview!(session, envelope.prompt, turnOptions)
+        : await adapter.startTurn(session, envelope.prompt, turnOptions);
       this.#patchLane(provider, { turnId: turn.id });
       if (this.#revokeAfterTurn === provider) await this.cancel(provider);
       for await (const providerEvent of turn.events) this.#applyEvent(provider, providerEvent);

@@ -100,9 +100,11 @@ export interface ProviderTurn {
 
 export interface ProviderAdapter {
   readonly provider: ProviderId;
+  readonly reviewMechanisms?: readonly ReviewMechanism[];
   probe(): Promise<ProviderProbe>;
   startSession(options: SessionOptions): Promise<SessionHandle>;
   startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn>;
+  startReview?(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn>;
   interrupt(turnId: string): Promise<void>;
   close(): Promise<void>;
 }
@@ -166,6 +168,7 @@ export interface ReviewEnvelope {
   writer: ProviderId;
   reviewer: ProviderId;
   mechanism: ReviewMechanism;
+  mechanismStability: CapabilityStability;
   objective: string;
   acceptanceCriteria: string;
   projectRoot: string;
@@ -206,6 +209,7 @@ export interface ReviewSnapshot {
   writer: ProviderId;
   reviewer: ProviderId;
   mechanism: ReviewMechanism;
+  availableMechanisms: readonly ReviewMechanism[];
   envelope: ReviewEnvelope;
   findings: readonly ReviewFinding[];
   activeFindingId: string | null;
