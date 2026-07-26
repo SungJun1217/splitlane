@@ -6,7 +6,7 @@ import { providerErrorAction } from "../core/provider-error.ts";
 import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
 import { lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | "isolated" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -77,6 +77,20 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
       <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
         <Text bold>FINDINGS · READ ONLY</Text>
         <Text dimColor>{review.reviewer} · {review.mechanism} [{review.envelope.mechanismStability}] · {review.envelope.diffHash.slice(0, 8)} · {review.stale ? "STALE" : "CURRENT"}</Text>
+        <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
+      </Box>
+    );
+  }
+  const isolated = snapshot.isolated;
+  if (isolated && isolated.lifecycle !== "preview" && isolated.lifecycle !== "cleaned") {
+    const body = (["claude", "codex"] as const).map((provider) => {
+      const lane = isolated.lanes[provider];
+      return `${provider.toUpperCase()} · ${lane.processState.toUpperCase()} · ${lane.dirty ? "DIRTY" : "CLEAN"}${lane.error ? " · UNREADABLE" : ""}\n${lane.branch}\n${lane.path}\nhead ${lane.head.slice(0, 12)}${lane.error ? `\n${lane.error}` : ""}`;
+    }).join("\n\n");
+    return (
+      <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
+        <Text bold>ISOLATED EVIDENCE · PRIMARY READ ONLY</Text>
+        <Text dimColor>{isolated.lifecycle.toUpperCase()} · base {isolated.baseCommit.slice(0, 12)} · no automatic merge</Text>
         <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
       </Box>
     );
@@ -250,7 +264,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>Prompt: Enter send · Ctrl+R target · Option+1/2 focus</Text>
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
         <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics · Ctrl+K queue</Text>
-        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Ctrl+H handoff</Text>
+        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Ctrl+H handoff · Ctrl+L isolated</Text>
         <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
@@ -343,6 +357,28 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
       </Box>
     );
   }
+  if (overlay === "isolated") {
+    const run = snapshot.isolated;
+    return (
+      <Box borderStyle="double" borderColor="magenta" flexDirection="column" paddingX={1}>
+        <Text bold>ISOLATED WORKTREES · EXPLICIT LIFECYCLE</Text>
+        {run ? <>
+          <Text>run: {run.runId} · {run.lifecycle.toUpperCase()} · base {run.baseCommit.slice(0, 12)}</Text>
+          <Text>primary: {run.primaryRoot} · observational only</Text>
+          {(["claude", "codex"] as const).map((provider) => {
+            const lane = run.lanes[provider];
+            return <Text key={provider}>{provider.toUpperCase()}: {lane.processState.toUpperCase()} · {lane.dirty ? "DIRTY" : "CLEAN"} · {lane.branch}{"\n"}  {lane.path}{lane.error ? ` · ${lane.error}` : ""}</Text>;
+          })}
+          {run.lifecycle === "preview" ? <Text color="yellow">Enter create both branches/worktrees · X/Esc discard preview</Text> : null}
+          {run.lifecycle !== "preview" && run.lifecycle !== "cleaned" ? <Text color="yellow">{destructiveConfirm ? "Press C again to remove only clean, idle, integrated worktree directories." : "R inspect · K retain · C review clean-only cleanup (branches remain)"}</Text> : null}
+          {run.lifecycle === "cleaned" ? <Text color="green">Worktree directories removed cleanly; branches remain for manual integration.</Text> : null}
+          <Text dimColor>Inspect: git diff {run.baseCommit.slice(0, 12)}...{run.lanes.claude.branch}</Text>
+          <Text dimColor>Inspect: git diff {run.baseCommit.slice(0, 12)}...{run.lanes.codex.branch}</Text>
+          <Text color="yellow">No setup scripts, force removal, automatic merge, cherry-pick, or branch deletion.</Text>
+        </> : <Text>No isolated plan. Ctrl+L prepares a preview after verifying a clean Git root.</Text>}
+      </Box>
+    );
+  }
   return (
     <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
       <Text bold>ACTION PALETTE · capability aware</Text>
@@ -385,13 +421,13 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   const focusedLaneHeight = snapshot.inspectorVisible ? Math.max(6, Math.floor(height * 0.65)) : height;
   const roleSummary = ROLE_IDS.map((role) => `${role.replace("_reviewer", "-rev")}:${snapshot.roles[role] === "claude" ? "C" : "X"}`).join(" · ");
   const footer = layout === "focused"
-    ? "PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ⌥1/2 focus · ^Q quit"
-    : "Enter send · PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ^R target · ^B build · ^V review · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^Q quit";
+    ? "PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ^L isolated · ⌥1/2 focus · ^Q quit"
+    : "Enter send · PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ^L isolated · ^R target · ^B build · ^V review · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^Q quit";
   return (
     <Box flexDirection="column">
       <Box justifyContent={layout === "focused" ? "flex-start" : "space-between"} flexDirection={layout === "focused" ? "column" : "row"}>
         <Text bold color="cyan">SPLITLANE · {layout.toUpperCase()}</Text>
-        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
+        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{snapshot.mode === "isolated" ? "EACH LANE" : snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
       {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
@@ -489,6 +525,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     if (key.escape) {
       if (overlay === "queue_offer") orchestrator.cancelQueueOffer();
       if (overlay === "handoff") orchestrator.cancelRoleHandoff();
+      if (overlay === "isolated" && snapshot.isolated?.lifecycle === "preview") orchestrator.cancelIsolatedPlan();
       setOverlay(null);
       setWriterConfirm(false);
       setDestructiveConfirm(false);
@@ -657,6 +694,23 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       }
       return;
     }
+    if (overlay === "isolated") {
+      const lifecycle = snapshot.isolated?.lifecycle;
+      if (key.return && lifecycle === "preview") {
+        void orchestrator.startIsolated();
+      } else if (input.toLowerCase() === "x" && lifecycle === "preview") {
+        orchestrator.cancelIsolatedPlan();
+        setOverlay(null);
+      } else if (input.toLowerCase() === "r" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+        void orchestrator.refreshIsolated();
+      } else if (input.toLowerCase() === "k" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+        void orchestrator.retainIsolated();
+      } else if (input.toLowerCase() === "c" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+        if (!destructiveConfirm) setDestructiveConfirm(true);
+        else void orchestrator.cleanupIsolated().then(() => setDestructiveConfirm(false));
+      }
+      return;
+    }
     if (key.pageUp || key.pageDown || key.home || key.end) {
       const provider = snapshot.focusedProvider;
       const lane = snapshot.lanes[provider];
@@ -730,6 +784,11 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     }
     else if (key.ctrl && input === "h") {
       void orchestrator.prepareRoleHandoff(prompt).then((ready) => { if (ready) setOverlay("handoff"); });
+    }
+    else if (key.ctrl && input === "l") {
+      setDestructiveConfirm(false);
+      if (snapshot.isolated && snapshot.isolated.lifecycle !== "cleaned") setOverlay("isolated");
+      else void orchestrator.prepareIsolated().then((ready) => { if (ready) setOverlay("isolated"); });
     }
     else if (key.ctrl && input === "d") setOverlay("diagnostics");
     else if (key.ctrl && input === "o") {

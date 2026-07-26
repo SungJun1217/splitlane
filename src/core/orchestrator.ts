@@ -3,6 +3,7 @@ import type {
   ApprovalDecision,
   AppSnapshot,
   HandoffPacket,
+  IsolatedRunSnapshot,
   LaneActivity,
   LaneActivityKind,
   LaneActivityStatus,
@@ -34,6 +35,7 @@ import { buildFindingsRelay, buildReviewPrompt, parseReviewFindings } from "../r
 import { loadFindingPreview } from "../review/preview.ts";
 import { classifyProviderError } from "./provider-error.ts";
 import { SessionStore, type SessionRecord } from "../session/store.ts";
+import { WorktreeManager } from "../worktree/manager.ts";
 
 // Visible M1 routing hypotheses only; this is not the approved v0.1 default profile.
 const M1_PREVIEW_ROLES: RoleProfile = {
@@ -77,8 +79,12 @@ export class CompareOrchestrator {
   #queueScheduling = false;
   readonly #allowPreview: boolean;
   readonly #sessionStore: SessionStore | null;
+  readonly #worktreeManager: WorktreeManager | null;
+  readonly #isolatedGuards = new Map<ProviderId, WorkspaceGuard>();
+  readonly #isolatedLeases = new Map<ProviderId, WriterLease>();
   readonly #providerVersions = new Map<ProviderId, string | null>();
   readonly #sessionWrites = new Map<ProviderId, Promise<unknown>>();
+  #worktreeWrite: Promise<unknown> = Promise.resolve();
   #snapshot: AppSnapshot;
 
   constructor(
@@ -90,6 +96,7 @@ export class CompareOrchestrator {
     this.#workspace = new WorkspaceGuard(projectRoot);
     this.#allowPreview = config?.capabilities.allowPreview ?? true;
     this.#sessionStore = config ? new SessionStore(config.stateDirectory, projectRoot) : null;
+    this.#worktreeManager = config ? new WorktreeManager(config.stateDirectory, projectRoot) : null;
     this.#snapshot = {
       mode: "compare",
       writer: null,
@@ -103,6 +110,7 @@ export class CompareOrchestrator {
       roles: { ...(config?.roles ?? M1_PREVIEW_ROLES) },
       handoffPhase: "scout",
       handoff: null,
+      isolated: null,
       approvals: [],
       review: null,
       queue: [],
@@ -228,6 +236,16 @@ export class CompareOrchestrator {
       updatedAt: record.updatedAt,
       interrupted: !record.clean,
     }));
+    let recoverable: IsolatedRunSnapshot | null = null;
+    let recoverableCount = 0;
+    if (this.#worktreeManager) {
+      try {
+        const runs = await this.#worktreeManager.recoverable();
+        recoverable = runs[0] ?? null;
+        recoverableCount = runs.length;
+      }
+      catch (error) { this.#diagnose("claude", `Isolated recovery scan failed: ${(error as Error).message}`); }
+    }
     this.#publish({
       ...this.#snapshot,
       git,
@@ -245,6 +263,8 @@ export class CompareOrchestrator {
           : { ...this.#snapshot.lanes.codex, status: "UNAVAILABLE", error: codexError, errorKind: classifyProviderError(codexError) },
       },
       restorableSessions: this.#snapshot.configuration.restoreSessions === "never" ? [] : restorableSessions,
+      isolated: recoverable,
+      notice: recoverable ? `${recoverableCount} retained isolated run${recoverableCount === 1 ? "" : "s"} found; inspect, keep, or clean ${recoverable.runId} explicitly.` : this.#snapshot.notice,
     });
     if (this.#snapshot.configuration.restoreSessions === "always" && restorableSessions.length) await this.restoreSessions();
   }
@@ -294,6 +314,7 @@ export class CompareOrchestrator {
   }
 
   #persistSession(provider: ProviderId, clean: boolean): void {
+    if (this.#snapshot.mode === "isolated") return;
     const session = this.#sessions.get(provider);
     if (!this.#sessionStore || !session?.id) return;
     const prior = this.#sessionWrites.get(provider) ?? Promise.resolve();
@@ -509,6 +530,176 @@ export class CompareOrchestrator {
 
   resetRoleHandoffChain(): void {
     this.#patch({ handoffPhase: "scout", handoff: null, notice: "Role handoff chain reset to scout; no routing or provider state changed." });
+  }
+
+  async prepareIsolated(): Promise<boolean> {
+    if (!this.#worktreeManager) {
+      this.#patch({ notice: "Isolated mode requires the configured user state directory." });
+      return false;
+    }
+    if (this.#snapshot.mode !== "compare" || this.#snapshot.queue.length || this.#snapshot.queueOffer || this.#snapshot.approvals.length) {
+      this.#patch({ notice: "Isolated mode requires compare mode with empty queues and no pending approvals." });
+      return false;
+    }
+    if ((["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+      this.#patch({ notice: "Isolated mode requires both provider lanes to be idle and available." });
+      return false;
+    }
+    if (this.#snapshot.isolated && this.#snapshot.isolated.lifecycle !== "cleaned") {
+      this.#patch({ notice: `Resolve retained isolated run ${this.#snapshot.isolated.runId} before creating another.` });
+      return false;
+    }
+    try {
+      const retained = await this.#worktreeManager.recoverable();
+      if (retained.length) {
+        this.#patch({ isolated: retained[0]!, notice: `Resolve retained isolated run ${retained[0]!.runId} before creating another.` });
+        return false;
+      }
+      const plan = await this.#worktreeManager.plan();
+      this.#patch({ isolated: plan, notice: "Isolated worktree plan ready; no directories or branches have been created yet." });
+      return true;
+    } catch (error) {
+      this.#patch({ notice: `Isolated mode refused: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    }
+  }
+
+  async startIsolated(): Promise<boolean> {
+    const plan = this.#snapshot.isolated;
+    if (!this.#worktreeManager || !plan || plan.lifecycle !== "preview" || this.#snapshot.mode !== "compare") return false;
+    try {
+      const active = await this.#worktreeManager.create(plan);
+      for (const provider of ["claude", "codex"] as const) {
+        const guard = new WorkspaceGuard(active.lanes[provider].path);
+        const lease = guard.grant(provider, active.baseCommit);
+        this.#isolatedGuards.set(provider, guard);
+        this.#isolatedLeases.set(provider, lease);
+        this.#sessions.delete(provider);
+        void this.#removeSessionMetadata(provider);
+        this.#patchLane(provider, { sessionId: null, output: "", activities: [], error: null, errorKind: null, status: "READY" });
+      }
+      this.#patch({
+        mode: "isolated",
+        writer: null,
+        writerLease: null,
+        review: null,
+        isolated: active,
+        notice: "Isolated mode active: each provider writes only in its own worktree; primary tree remains read-only.",
+      });
+      return true;
+    } catch (error) {
+      let failed = plan;
+      try { failed = await this.#worktreeManager.inspect({ ...plan, lifecycle: "failed", error: sanitizeTerminalText((error as Error).message) }); } catch {}
+      this.#patch({ isolated: failed, notice: `Isolated creation failed and any created worktree was retained: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    }
+  }
+
+  cancelIsolatedPlan(): void {
+    if (this.#snapshot.isolated?.lifecycle !== "preview") return;
+    this.#patch({ isolated: null, notice: "Isolated preview discarded; no branch or worktree was created." });
+  }
+
+  async refreshIsolated(): Promise<void> {
+    if (!this.#worktreeManager || !this.#snapshot.isolated || this.#snapshot.isolated.lifecycle === "preview") return;
+    const task = this.#worktreeWrite.then(async () => {
+      const current = this.#snapshot.isolated;
+      if (!current || current.lifecycle === "preview" || current.lifecycle === "cleaned") return;
+      this.#patch({ isolated: await this.#worktreeManager!.inspect(current) });
+    });
+    this.#worktreeWrite = task.catch((error) => {
+      this.#patch({ notice: `Isolated inspection failed: ${sanitizeTerminalText((error as Error).message)}` });
+    });
+    await this.#worktreeWrite;
+  }
+
+  async retainIsolated(): Promise<boolean> {
+    const run = this.#snapshot.isolated;
+    if (!this.#worktreeManager || !run || run.lifecycle === "preview" || run.lifecycle === "cleaned") return false;
+    if (this.#snapshot.queue.length || this.#snapshot.queueOffer) {
+      this.#patch({ notice: "Remove queued isolated requests before retaining the run; frozen authority will not be changed silently." });
+      return false;
+    }
+    if ((["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+      this.#patch({ notice: "Isolated retain requires both provider processes to be idle." });
+      return false;
+    }
+    try {
+      await this.#worktreeWrite;
+      const retained = await this.#worktreeManager.retain(this.#snapshot.isolated ?? run);
+      this.#leaveIsolatedSessions();
+      this.#patch({ mode: "compare", isolated: retained, notice: `Isolated run ${run.runId} retained. Primary tree and branches were not modified.` });
+      return true;
+    } catch (error) {
+      this.#patch({ notice: `Unable to retain isolated run metadata: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    }
+  }
+
+  async cleanupIsolated(): Promise<boolean> {
+    const run = this.#snapshot.isolated;
+    if (!this.#worktreeManager || !run || run.lifecycle === "preview" || run.lifecycle === "cleaned") return false;
+    if (this.#snapshot.queue.length || this.#snapshot.queueOffer) {
+      this.#patch({ notice: "Remove queued isolated requests before cleanup; frozen authority will not be changed silently." });
+      return false;
+    }
+    if ((["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+      this.#patch({ notice: "Isolated cleanup requires both provider processes to be idle." });
+      return false;
+    }
+    try {
+      await this.#worktreeWrite;
+      const cleaned = await this.#worktreeManager.cleanup(this.#snapshot.isolated ?? run);
+      this.#leaveIsolatedSessions();
+      const remaining = await this.#worktreeManager.recoverable();
+      this.#patch({
+        mode: "compare",
+        isolated: remaining[0] ?? cleaned,
+        notice: remaining.length
+          ? `Clean isolated worktrees removed; ${remaining.length} retained run${remaining.length === 1 ? "" : "s"} remain for explicit recovery.`
+          : "Clean isolated worktrees removed. Branches were retained; no merge or branch deletion ran.",
+      });
+      return true;
+    } catch (error) {
+      let retained = run;
+      try { retained = await this.#worktreeManager.retain(run); } catch {}
+      this.#leaveIsolatedSessions();
+      this.#patch({ mode: "compare", isolated: retained, notice: `Isolated worktrees retained for recovery: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    }
+  }
+
+  isolatedIntegrationCommands(): Record<ProviderId, readonly string[]> | null {
+    return this.#worktreeManager && this.#snapshot.isolated ? this.#worktreeManager.integrationCommands(this.#snapshot.isolated) : null;
+  }
+
+  #revokeIsolatedLeases(): void {
+    for (const provider of ["claude", "codex"] as const) {
+      const guard = this.#isolatedGuards.get(provider);
+      const lease = this.#isolatedLeases.get(provider);
+      if (guard && lease) guard.revoke(lease.id);
+    }
+    this.#isolatedGuards.clear();
+    this.#isolatedLeases.clear();
+  }
+
+  #leaveIsolatedSessions(): void {
+    this.#revokeIsolatedLeases();
+    this.#sessions.clear();
+    for (const provider of ["claude", "codex"] as const) this.#patchLane(provider, { sessionId: null, turnId: null });
+  }
+
+  #markIsolatedProcess(provider: ProviderId, processState: "idle" | "running"): void {
+    const run = this.#snapshot.isolated;
+    if (!this.#worktreeManager || this.#snapshot.mode !== "isolated" || !run || run.lifecycle !== "active") return;
+    const next: IsolatedRunSnapshot = {
+      ...run,
+      lanes: { ...run.lanes, [provider]: { ...run.lanes[provider], processState } },
+    };
+    this.#patch({ isolated: next });
+    this.#worktreeWrite = this.#worktreeWrite
+      .then(() => this.#worktreeManager!.writeManifest(next))
+      .catch((error) => this.#diagnose(provider, `Isolated process-state write failed: ${(error as Error).message}`));
   }
 
   async promoteWriter(provider: ProviderId, dirtyTreeAcknowledged: boolean): Promise<boolean> {
@@ -1033,10 +1224,8 @@ export class CompareOrchestrator {
     turnId: string,
     request: ProviderApprovalRequest,
   ): Promise<ApprovalDecision> {
-    const lease = this.#snapshot.writerLease;
-    const allowedWriter = this.#snapshot.mode === "build" &&
-      this.#snapshot.writer === provider &&
-      this.#workspace.validate(lease, provider);
+    const workspace = this.#workspaceContext(provider);
+    const allowedWriter = workspace.access === "workspace_write";
     if (!allowedWriter) {
       this.#diagnose(provider, "Unexpected approval request from a read-only lane was denied.");
       this.#patchLane(provider, { toolSummary: "unexpected approval denied (read-only)" });
@@ -1044,7 +1233,7 @@ export class CompareOrchestrator {
     }
     const id = randomUUID();
     const requestedPaths = [...request.paths, request.path, request.cwd].filter((value): value is string => Boolean(value));
-    const outsideWorkspace = requestedPaths.some((path) => !isPathInsideWorkspace(this.projectRoot, path));
+    const outsideWorkspace = requestedPaths.some((path) => !isPathInsideWorkspace(workspace.root, path));
     const unknownFileBoundary = request.kind === "file_change" && request.paths.length === 0 && !request.path;
     if (outsideWorkspace || unknownFileBoundary || request.networkEffect === "requested") {
       const reason = outsideWorkspace
@@ -1161,7 +1350,9 @@ export class CompareOrchestrator {
 
   async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism, frozenModel?: string): Promise<void> {
     const adapter = this.adapters[provider];
+    this.#markIsolatedProcess(provider, "running");
     try {
+      const workspace = this.#workspaceContext(provider);
       let session = this.#sessions.get(provider);
       const requestedModel = frozenModel ?? this.#snapshot.lanes[provider].requestedModel;
       if (session && session.requestedModel !== requestedModel) {
@@ -1169,7 +1360,7 @@ export class CompareOrchestrator {
         session = undefined;
       }
       if (!session) {
-        session = await adapter.startSession({ projectRoot: this.projectRoot, requestedModel });
+        session = await adapter.startSession({ projectRoot: workspace.root, requestedModel });
         this.#sessions.set(provider, session);
         this.#patchLane(provider, {
           sessionId: session.id || null,
@@ -1177,17 +1368,11 @@ export class CompareOrchestrator {
         });
       }
       this.#persistSession(provider, false);
-      const lease = this.#snapshot.writerLease;
-      const workspaceAccess = this.#snapshot.mode === "build" &&
-          this.#snapshot.writer === provider &&
-          this.#workspace.validate(lease, provider)
-        ? "workspace_write"
-        : "read_only";
       const turnOptions: TurnOptions = {
         requestedModel,
-        projectRoot: this.projectRoot,
-        workspaceAccess,
-        writerLease: workspaceAccess === "workspace_write" ? lease : null,
+        projectRoot: workspace.root,
+        workspaceAccess: workspace.access,
+        writerLease: workspace.lease,
         requestApproval: (request) => this.#requestApproval(
           provider,
           this.#snapshot.lanes[provider].turnId ?? "starting",
@@ -1205,6 +1390,7 @@ export class CompareOrchestrator {
       for await (const providerEvent of turn.events) this.#applyEvent(provider, providerEvent);
     } catch (error) {
       this.#diagnose(provider, (error as Error).message);
+      this.#markIsolatedProcess(provider, "idle");
       this.#patchLane(provider, {
         status: "FAILED",
         error: sanitizeTerminalText((error as Error).message),
@@ -1221,8 +1407,26 @@ export class CompareOrchestrator {
       });
       if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
     } finally {
+      this.#markIsolatedProcess(provider, "idle");
       void this.#scheduleQueue();
     }
+  }
+
+  #workspaceContext(provider: ProviderId): { root: string; access: "read_only" | "workspace_write"; lease: WriterLease | null } {
+    const isolated = this.#snapshot.isolated;
+    const isolatedGuard = this.#isolatedGuards.get(provider);
+    const isolatedLease = this.#isolatedLeases.get(provider) ?? null;
+    if (
+      this.#snapshot.mode === "isolated" && isolated?.lifecycle === "active" &&
+      isolatedGuard?.validate(isolatedLease, provider)
+    ) {
+      return { root: isolated.lanes[provider].path, access: "workspace_write", lease: isolatedLease };
+    }
+    const lease = this.#snapshot.writerLease;
+    if (this.#snapshot.mode === "build" && this.#snapshot.writer === provider && this.#workspace.validate(lease, provider)) {
+      return { root: this.projectRoot, access: "workspace_write", lease };
+    }
+    return { root: this.projectRoot, access: "read_only", lease: null };
   }
 
   #applyEvent(provider: ProviderId, providerEvent: NormalizedEvent): void {
@@ -1288,20 +1492,23 @@ export class CompareOrchestrator {
         break;
       case "file.changed": {
         const path = typeof providerEvent.payload.path === "string" ? providerEvent.payload.path : null;
+        const workspace = this.#workspaceContext(provider);
         this.#addActivity(provider, {
           id: providerEvent.event_id,
           kind: "file",
           status: "completed",
           title: path ? "File changed" : "File change reported",
           detail: path,
-          safetyEffect: this.#snapshot.writer === provider ? "writer workspace" : "read-only anomaly",
+          safetyEffect: workspace.access === "workspace_write"
+            ? this.#snapshot.mode === "isolated" ? "isolated provider worktree" : "writer workspace"
+            : "read-only anomaly",
           timestamp: providerEvent.timestamp,
         });
         if (this.#snapshot.writer === provider) this.#git.noteWriterChange(path);
         if (this.#gitRefreshTimer) clearTimeout(this.#gitRefreshTimer);
         this.#gitRefreshTimer = setTimeout(() => {
           this.#gitRefreshTimer = null;
-          void this.refreshGit();
+          this.#refreshEvidence();
         }, 150);
         break;
       }
@@ -1314,7 +1521,9 @@ export class CompareOrchestrator {
           detail: [providerEvent.payload.command, providerEvent.payload.path]
             .filter((value): value is string => typeof value === "string")
             .join(" · ") || null,
-          safetyEffect: this.#snapshot.writer === provider ? "temporary writer approval" : "deny-only read-only request",
+          safetyEffect: this.#workspaceContext(provider).access === "workspace_write"
+            ? this.#snapshot.mode === "isolated" ? "isolated worktree approval" : "temporary writer approval"
+            : "deny-only read-only request",
           timestamp: providerEvent.timestamp,
         });
         if (this.#snapshot.approvals.some((approval) => approval.provider === provider)) {
@@ -1329,20 +1538,23 @@ export class CompareOrchestrator {
         break;
       case "turn.completed":
         this.#resolveApprovalsFor(provider, "cancel_turn");
+        this.#markIsolatedProcess(provider, "idle");
         this.#patchLane(provider, { status: "COMPLETED", turnId: null });
-        void this.refreshGit();
+        this.#refreshEvidence();
         if (this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
         this.#persistSession(provider, true);
         break;
       case "turn.cancelled":
         this.#resolveApprovalsFor(provider, "cancel_turn");
+        this.#markIsolatedProcess(provider, "idle");
         this.#patchLane(provider, { status: "CANCELLED", turnId: null });
-        void this.refreshGit();
+        this.#refreshEvidence();
         if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
         this.#persistSession(provider, true);
         break;
       case "turn.failed":
         this.#resolveApprovalsFor(provider, "cancel_turn");
+        this.#markIsolatedProcess(provider, "idle");
         this.#diagnose(provider, providerEvent.payload.error ?? "Provider turn failed");
         this.#patchLane(provider, {
           status: "FAILED",
@@ -1359,7 +1571,7 @@ export class CompareOrchestrator {
           safetyEffect: null,
           timestamp: providerEvent.timestamp,
         });
-        void this.refreshGit();
+        this.#refreshEvidence();
         if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
         this.#persistSession(provider, true);
         break;
@@ -1408,6 +1620,11 @@ export class CompareOrchestrator {
     this.#patch({ git });
   }
 
+  #refreshEvidence(): void {
+    if (this.#snapshot.mode === "isolated") void this.refreshIsolated();
+    else void this.refreshGit();
+  }
+
   async close(): Promise<void> {
     if (this.#gitRefreshTimer) clearTimeout(this.#gitRefreshTimer);
     this.#gitRefreshTimer = null;
@@ -1420,6 +1637,17 @@ export class CompareOrchestrator {
     }
     await Promise.allSettled([...this.#sessionWrites.values()]);
     await Promise.allSettled(Object.values(this.adapters).map((adapter) => adapter.close()));
+    await this.#worktreeWrite;
     if (this.#snapshot.writer) this.#completeRevocation(this.#snapshot.writer);
+    const isolated = this.#snapshot.isolated;
+    if (this.#worktreeManager && isolated && isolated.lifecycle === "active") {
+      try {
+        const retained = await this.#worktreeManager.retain(isolated);
+        this.#patch({ mode: "compare", isolated: retained });
+      } catch (error) {
+        this.#diagnose("claude", `Isolated shutdown retention failed: ${(error as Error).message}`);
+      }
+    }
+    this.#leaveIsolatedSessions();
   }
 }

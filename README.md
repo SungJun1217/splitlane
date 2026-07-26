@@ -1,12 +1,13 @@
 # Splitlane
 
 Splitlane is a local terminal UI that keeps Claude Code and Codex in separate
-lanes. It starts in read-only `compare` mode. The current M3 preview adds an
-explicit single-writer `build` mode and a human-confirmed handoff to one
-read-only reviewer; there is still no automatic routing, grading, merging,
-review/fix loop, or session persistence.
+lanes. It starts in read-only `compare` mode. The current v0.1 preview includes
+an explicit single-writer `build` mode, read-only single/two-lens review,
+metadata-only independent session restore, atomic queues, role handoff packets,
+and opt-in isolated worktrees. There is no automatic routing, grading, merging,
+or review/fix loop.
 
-## Install the M3 preview
+## Install the v0.1 preview
 
 The first GitHub distribution targets are macOS on Apple Silicon and glibc-based
 Linux on x86_64. After a public release is published, install the matching
@@ -49,8 +50,9 @@ target, `Alt+1`/`Alt+2` for lane focus, `Ctrl+B` for two-step writer promotion,
 `Ctrl+W` to revoke the writer, `Ctrl+A` for pending approvals, `Ctrl+X` for
 lane-local cancellation, `Ctrl+K` for the request queue, `Ctrl+U` for effective
 configuration, `Ctrl+V` to prepare a review handoff, `Ctrl+F` for
-review findings, `Ctrl+I` for the read-only Git inspector, and `Ctrl+Q` to close
-provider transports and exit.
+review findings, `Ctrl+L` for isolated worktree preview/recovery, `Ctrl+I` for
+the read-only evidence inspector, and `Ctrl+Q` to close provider transports and
+exit.
 
 When a selected lane is busy, Splitlane sends nothing and asks whether to queue
 the complete request. `both` remains one atomic queue group and starts only when
@@ -122,6 +124,20 @@ focused-lane output and the shared editor objective. The preview shows its
 constraints, relevant files, questions, acceptance criteria, source session,
 and Git fingerprint. Confirming only places the bounded packet into the shared
 prompt editor; it does not change the target or send a provider turn.
+
+`Ctrl+L` prepares isolated mode only from an idle `compare` state with empty
+queues, no approvals, a clean Git root, and an existing base commit. The first
+screen is a no-write preview. Confirming creates one user-state worktree and
+`splitlane/<run-id>/<provider>` branch per provider; each lane receives write
+access only to its own root while the primary tree remains observational.
+Provider sessions remain independent and restart in their worktree roots.
+
+The isolated overlay uses `R` to inspect, `K` to retain, and `C` for safe
+cleanup. Splitlane never runs setup scripts, stashes/resets files, force-removes
+a worktree, integrates commits, or deletes branches. Dirty, unreadable, or
+not-yet-integrated worktrees are retained, and startup surfaces their manifest
+for recovery. Clean worktree directories can be removed only after their head
+is reachable from the primary branch; provider branches still remain.
 
 ## Verify without credentials or model cost
 

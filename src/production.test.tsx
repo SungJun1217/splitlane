@@ -218,6 +218,16 @@ async function gitCommand(root: string, ...args: string[]): Promise<void> {
   if (exitCode !== 0) throw new Error(await new Response(child.stderr).text());
 }
 
+async function gitResult(root: string, ...args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
 describe("production orchestrator", () => {
   test("broadcast reserves both lanes atomically and refuses a second send", async () => {
     const { orchestrator, claude, codex } = setup("hold", "hold");
@@ -983,6 +993,165 @@ describe("M2 workspace guard", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("isolated worktree lifecycle", () => {
+  async function isolatedRepository(): Promise<{ outer: string; root: string; config: Awaited<ReturnType<typeof loadConfig>> }> {
+    const outer = await mkdtemp(join(tmpdir(), "splitlane-isolated-"));
+    const root = join(outer, "repo");
+    await mkdir(root);
+    await gitCommand(root, "init", "-q");
+    await gitCommand(root, "config", "user.email", "test@example.invalid");
+    await gitCommand(root, "config", "user.name", "Splitlane Test");
+    await Bun.write(join(root, "existing.txt"), "baseline\n");
+    await gitCommand(root, "add", "existing.txt");
+    await gitCommand(root, "commit", "-qm", "baseline");
+    const config = await loadConfig(root, { platform: "linux", home: join(outer, "home"), env: {} });
+    return { outer, root, config };
+  }
+
+  test("previews without writes, then gives each provider an independent writer root", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const claude = new FakeAdapter("claude", "complete");
+    const codex = new FakeAdapter("codex", "complete");
+    const orchestrator = new CompareOrchestrator(root, { claude, codex }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      const preview = orchestrator.getSnapshot().isolated!;
+      expect(preview.lifecycle).toBe("preview");
+      expect(await Bun.file(join(preview.lanes.claude.path, ".git")).exists()).toBe(false);
+      expect(await Bun.file(join(preview.lanes.codex.path, ".git")).exists()).toBe(false);
+
+      expect(await orchestrator.startIsolated()).toBe(true);
+      const active = orchestrator.getSnapshot().isolated!;
+      expect(orchestrator.getSnapshot().mode).toBe("isolated");
+      expect(active.lifecycle).toBe("active");
+      expect(active.lanes.claude.path).not.toBe(active.lanes.codex.path);
+      expect(await orchestrator.dispatch("same envelope, separate sessions and roots")).toBe(true);
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED" && orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
+      expect(claude.turnOptions[0]).toMatchObject({ projectRoot: active.lanes.claude.path, workspaceAccess: "workspace_write" });
+      expect(codex.turnOptions[0]).toMatchObject({ projectRoot: active.lanes.codex.path, workspaceAccess: "workspace_write" });
+      expect(claude.turnOptions[0]?.writerLease?.provider).toBe("claude");
+      expect(codex.turnOptions[0]?.writerLease?.provider).toBe("codex");
+      expect(claude.sessions[0]?.projectRoot).toBe(active.lanes.claude.path);
+      expect(codex.sessions[0]?.projectRoot).toBe(active.lanes.codex.path);
+      expect((await gitResult(root, "status", "--porcelain")).stdout).toBe("");
+
+      const screen = renderToString(<SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={120} rows={30} overlay="isolated" />, { columns: 120 });
+      expect(screen).toContain("ISOLATED WORKTREES");
+      expect(screen).toContain("EACH LANE");
+      expect(screen).toContain("No setup scripts, force removal, automatic merge");
+
+      expect(await orchestrator.cleanupIsolated()).toBe(true);
+      expect(orchestrator.getSnapshot().isolated?.lifecycle).toBe("cleaned");
+      expect(await Bun.file(join(active.lanes.claude.path, ".git")).exists()).toBe(false);
+      expect(await Bun.file(join(active.lanes.codex.path, ".git")).exists()).toBe(false);
+      expect((await gitResult(root, "show-ref", "--verify", `refs/heads/${active.lanes.claude.branch}`)).exitCode).toBe(0);
+      expect((await gitResult(root, "show-ref", "--verify", `refs/heads/${active.lanes.codex.branch}`)).exitCode).toBe(0);
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("never force-cleans dirty worktrees and can recover a retained run", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const first = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await first.initialize();
+      expect(await first.prepareIsolated()).toBe(true);
+      expect(await first.startIsolated()).toBe(true);
+      const active = first.getSnapshot().isolated!;
+      const dirtyFile = join(active.lanes.claude.path, "uncommitted.txt");
+      await Bun.write(dirtyFile, "must survive\n");
+      await first.refreshIsolated();
+      expect(first.getSnapshot().isolated?.lanes.claude.dirty).toBe(true);
+      expect(await first.cleanupIsolated()).toBe(false);
+      expect(first.getSnapshot().isolated?.lifecycle).toBe("retained");
+      expect(await Bun.file(dirtyFile).text()).toBe("must survive\n");
+      expect(first.getSnapshot().notice).toContain("never force-removes");
+      await first.close();
+
+      const recovered = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+      await recovered.initialize();
+      expect(recovered.getSnapshot().isolated?.runId).toBe(active.runId);
+      expect(recovered.getSnapshot().notice).toContain("inspect, keep, or clean");
+      await rm(dirtyFile);
+      expect(await recovered.cleanupIsolated()).toBe(true);
+      await recovered.close();
+    } finally {
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("isolated approvals are bounded to the requesting provider worktree", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const claude = new FakeAdapter("claude", "approval");
+    const codex = new FakeAdapter("codex", "complete");
+    const orchestrator = new CompareOrchestrator(root, { claude, codex }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      expect(await orchestrator.startIsolated()).toBe(true);
+      const active = orchestrator.getSnapshot().isolated!;
+      orchestrator.setTarget("claude");
+      expect(await orchestrator.dispatch("request one local write")).toBe(true);
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "BLOCKED");
+      const approval = orchestrator.getSnapshot().approvals[0]!;
+      expect(approval.cwd).toBe(active.lanes.claude.path);
+      expect(approval.outsideWorkspace).toBe(false);
+      expect(orchestrator.getSnapshot().lanes.claude.activities.at(-1)?.safetyEffect).toBe("isolated worktree approval");
+      expect(orchestrator.resolveApproval(approval.id, "allow_once")).toBe(true);
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      expect(claude.approvalDecisions).toEqual(["allow_once"]);
+      expect(await orchestrator.cleanupIsolated()).toBe(true);
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("retains clean worktrees whose commits have not been integrated", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      expect(await orchestrator.startIsolated()).toBe(true);
+      const active = orchestrator.getSnapshot().isolated!;
+      await Bun.write(join(active.lanes.claude.path, "committed.txt"), "provider commit\n");
+      await gitCommand(active.lanes.claude.path, "add", "committed.txt");
+      await gitCommand(active.lanes.claude.path, "commit", "-qm", "provider work");
+      await orchestrator.refreshIsolated();
+      expect(orchestrator.getSnapshot().isolated?.lanes.claude.dirty).toBe(false);
+      expect(await orchestrator.cleanupIsolated()).toBe(false);
+      expect(orchestrator.getSnapshot().notice).toContain("not integrated");
+      expect(await Bun.file(join(active.lanes.claude.path, "committed.txt")).exists()).toBe(true);
+
+      await gitCommand(root, "merge", "--ff-only", active.lanes.claude.branch);
+      expect(await orchestrator.cleanupIsolated()).toBe(true);
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses dirty primary trees before creating any isolated branch", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await Bun.write(join(root, "dirty.txt"), "dirty\n");
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(false);
+      expect(orchestrator.getSnapshot().isolated).toBeNull();
+      expect(orchestrator.getSnapshot().notice).toContain("will not stash or reset");
+      expect((await gitResult(root, "branch", "--list", "splitlane/*")).stdout).toBe("");
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
     }
   });
 });

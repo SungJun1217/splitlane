@@ -261,3 +261,20 @@ or authorize paid live model turns.
 - Type checking and 80 offline tests cover same-diff identity, independent
   completion/failure/cancellation, provider-attributed findings, single-lens
   relay, bounded Korean handoff rendering, and zero implicit dispatch.
+
+### 2026-07-26 — Isolated worktree lifecycle
+
+- Added an explicit no-write preview followed by one user-state worktree,
+  collision-checked branch, workspace guard, and writer lease per provider. The
+  primary tree remains observational and provider sessions restart independently
+  in their own roots.
+- Added atomic `isolated-run/v1` manifests, startup recovery, per-lane
+  status/head evidence, explicit inspect/retain/cleanup actions, and manual
+  diff/log/merge/cherry-pick command hints without executing integration.
+- Cleanup never uses force and refuses active processes, queued frozen authority,
+  dirty/unreadable worktrees, and commits not reachable from the primary branch.
+  Worktree branches are retained even after clean directory removal.
+- Offline tests cover preview immutability, separate roots and leases, primary
+  tree isolation, provider-local approvals, dirty and unintegrated retention,
+  restart recovery, clean cleanup, branch preservation, and dirty-primary
+  refusal. No provider model turn or network access was used.

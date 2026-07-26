@@ -1,6 +1,6 @@
 export type ProviderId = "claude" | "codex";
 export type PromptTarget = "both" | ProviderId;
-export type WorkflowMode = "compare" | "build" | "review";
+export type WorkflowMode = "compare" | "build" | "review" | "isolated";
 export type ModelSource = "request" | "project" | "user" | "provider_default";
 export type CapabilityStability = "stable" | "preview" | "experimental";
 export type WorkspaceAccess = "read_only" | "workspace_write";
@@ -322,6 +322,31 @@ export interface HandoffPacket {
   sourceExcerpt: string;
 }
 
+export type IsolatedLifecycle = "preview" | "creating" | "active" | "retained" | "cleaned" | "failed";
+
+export interface IsolatedLaneWorkspace {
+  provider: ProviderId;
+  path: string;
+  branch: string;
+  baseCommit: string;
+  processState: "idle" | "running";
+  dirty: boolean;
+  head: string;
+  error: string | null;
+}
+
+export interface IsolatedRunSnapshot {
+  schemaVersion: "isolated-run/v1";
+  runId: string;
+  createdAt: string;
+  primaryRoot: string;
+  baseCommit: string;
+  lifecycle: IsolatedLifecycle;
+  lanes: Record<ProviderId, IsolatedLaneWorkspace>;
+  manifestPath: string;
+  error: string | null;
+}
+
 export interface AppSnapshot {
   mode: WorkflowMode;
   writer: ProviderId | null;
@@ -335,6 +360,7 @@ export interface AppSnapshot {
   roles: RoleProfile;
   handoffPhase: HandoffPhase;
   handoff: HandoffPacket | null;
+  isolated: IsolatedRunSnapshot | null;
   approvals: readonly PendingApproval[];
   review: ReviewSnapshot | null;
   queue: readonly QueueItem[];
