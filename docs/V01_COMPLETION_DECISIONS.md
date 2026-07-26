@@ -104,6 +104,33 @@ and a push to `main`.
 - Resetting one lane deletes only that lane's Splitlane metadata after explicit
   confirmation; it does not modify provider-owned history.
 
+### 2026-07-27 approved revision — shared meta conversation
+
+- One visible `meta-session/v1` owns both provider-native child sessions. Claude
+  session IDs and Codex thread IDs remain independent implementation details;
+  Splitlane never claims they are one provider session.
+- Ordinary user prompts and bounded provider text results form one in-memory
+  turn ledger. A provider's next requested turn receives every ledger entry it
+  has not seen, including peer results and provider-only turns. No hidden model
+  turn is started solely to synchronize an inactive lane.
+- Parallel results join the shared ledger only after each result arrives, so
+  same-turn agents do not see one another. Both receive those peer results on a
+  subsequent turn. The UI displays pending-entry counts and injected byte size.
+- Peer results are delimited as untrusted quoted context, not system or tool
+  instructions. Tool calls, approvals, raw provider events, credentials, and
+  workspace authority are never copied into the relay.
+- The shared text window is sanitized, per-entry bounded, globally bounded, and
+  memory-only. Session metadata may persist only the opaque meta-session ID and
+  a synchronization epoch; no prompt or provider output is persisted.
+- Restoration groups matching child sessions under the prior meta-session ID
+  but starts a visible new synchronization epoch. Splitlane does not replay
+  unavailable transcript text or pretend that an undelivered pre-shutdown delta
+  was synchronized.
+
+The user explicitly approved this revision on 2026-07-27 after clarifying that
+Splitlane must behave as one shared meta conversation rather than two merely
+adjacent conversations.
+
 ## 5. Two-lens review and role handoff contract
 
 - Two-lens review freezes one exact review envelope and starts Claude and Codex
@@ -291,3 +318,23 @@ or authorize paid live model turns.
   missing-binary failures, and secret-free human/JSON output. The installed
   Claude Code 2.1.220 and Codex CLI 0.145.0 probe passes required transports;
   native Codex review remains a visible local capability warning.
+
+### 2026-07-27 — Shared meta conversation
+
+- Grouped the independent Claude Code and Codex native sessions under one
+  visible `meta-session/v1` identity. Ordinary prompts and attributed text
+  results are relayed into the other requested lane on its next real turn.
+- Provider-only turns use lazy synchronization, and parallel results become
+  peer context on the following turn. Splitlane does not start hidden paid
+  turns or claim that the two provider-native session identifiers are equal.
+- Peer output is bounded, terminal-sanitized, credential-redacted, and clearly
+  marked as untrusted quoted evidence. If one provider falls too far behind,
+  dispatch refuses with a visible catch-up instruction instead of dropping
+  unseen context.
+- Shared transcript text remains memory-only. Session state persists only the
+  opaque meta ID and epoch; restoration starts a visible new epoch without
+  replaying or fabricating conversation history.
+- Offline fake-provider coverage verifies bidirectional relay, lazy single-lane
+  catch-up, independent failure attribution, child-session reset resync,
+  metadata-only restoration, credential redaction, UTF-8-safe bounds, and
+  narrow Korean rendering. No provider model turn or credential is used.

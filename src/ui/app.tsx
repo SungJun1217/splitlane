@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
-import type { AppSnapshot, LaneSnapshot, ProviderId, RoleId } from "../domain.ts";
+import type { AppSnapshot, LaneSnapshot, MetaSessionSnapshot, ProviderId, RoleId } from "../domain.ts";
 import type { CompareOrchestrator } from "../core/orchestrator.ts";
 import { providerErrorAction } from "../core/provider-error.ts";
 import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
@@ -19,6 +19,7 @@ const ROLE_IDS: readonly RoleId[] = [
 
 const ACTIONS = [
   ["common.prompt", "stable", "Send to selected target"],
+  ["common.meta_context", "stable", "Lazily synchronize bounded peer text into one meta conversation"],
   ["common.cancel_lane", "stable", "Cancel focused lane only"],
   ["common.writer_lease", "stable", "Promote or revoke one visible writer"],
   ["common.approval_inbox", "stable", "Allow once, deny, or cancel turn"],
@@ -38,9 +39,9 @@ function statusColor(status: LaneSnapshot["status"]): string {
   return "gray";
 }
 
-function Lane({ lane, focused, height, scrollOffset }: { lane: LaneSnapshot; focused: boolean; height: number; scrollOffset: number }) {
+function Lane({ lane, meta, focused, height, scrollOffset }: { lane: LaneSnapshot; meta: MetaSessionSnapshot; focused: boolean; height: number; scrollOffset: number }) {
   const latestActivity = lane.activities.at(-1);
-  const outputHeight = Math.max(2, height - 5 - (lane.error ? 2 : 0));
+  const outputHeight = Math.max(2, height - 6 - (lane.error ? 2 : 0));
   const viewport = scrollWindow(lane.output || (lane.error ? "" : "No output yet."), outputHeight, scrollOffset);
   return (
     <Box borderStyle={focused ? "double" : "round"} borderColor={focused ? "cyan" : "gray"} flexDirection="column" paddingX={1} height={height} flexGrow={1}>
@@ -49,6 +50,7 @@ function Lane({ lane, focused, height, scrollOffset }: { lane: LaneSnapshot; foc
         <Text color={statusColor(lane.status)}>{lane.status}</Text>
       </Box>
       <Text dimColor>model: {lane.effectiveModel} ({lane.modelSource})  session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}</Text>
+      <Text color={meta.pendingEntries[lane.provider] ? "yellow" : "gray"}>shared sync: {meta.pendingEntries[lane.provider]} pending · last injected {meta.lastInjectedBytes[lane.provider]} B</Text>
       <Text color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
         {latestActivity ? `${latestActivity.kind} · ${latestActivity.status} · ${latestActivity.title}` : "activity · none"}
         {viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : " · FOLLOW TAIL"}
@@ -267,6 +269,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Ctrl+H handoff · Ctrl+L isolated</Text>
         <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
+        <Text>Meta session: provider-only turns sync lazily; parallel peer results arrive next ordinary turn</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
         <Text dimColor>Ctrl+G/Esc close</Text>
       </Box>
@@ -321,7 +324,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
       <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
         <Text bold>RESTORE PROVIDER SESSIONS · METADATA ONLY · NO AUTHORITY</Text>
         {snapshot.restorableSessions.map((record) => <Text key={record.provider} color={record.interrupted ? "yellow" : "white"}>
-          {record.provider.toUpperCase()} · {record.requestedModel} · {record.interrupted ? "INTERRUPTED" : "CLEAN"}{restoreInspect ? ` · ${record.sessionId.slice(0, 12)} · ${record.updatedAt}` : ""}
+          {record.provider.toUpperCase()} · {record.requestedModel} · {record.interrupted ? "INTERRUPTED" : "CLEAN"}{restoreInspect ? ` · child ${record.sessionId.slice(0, 12)} · meta ${record.metaSessionId?.slice(0, 8) ?? "legacy"} · ${record.updatedAt}` : ""}
         </Text>)}
         <Text color="yellow">{destructiveConfirm ? "Press R again to restore independently. Writer, queue, approvals, and mode stay reset." : "R restore · N start new · I inspect metadata"}</Text>
         <Text dimColor>Restore uses provider IDs; prompts and transcripts are never replayed.</Text>
@@ -429,11 +432,12 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
         <Text bold color="cyan">SPLITLANE · {layout.toUpperCase()}</Text>
         <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{snapshot.mode === "isolated" ? "EACH LANE" : snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
+      <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text> · epoch {snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · peer relay memory-only {snapshot.metaSession.retainedBytes} B · redacted {snapshot.metaSession.redactedEntries}</Text>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
       {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
         <Box flexDirection={outerDirection} gap={1}>
           <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
-            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} scrollOffset={scrollOffsets[provider]} />)}
+            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} scrollOffset={scrollOffsets[provider]} />)}
           </Box>
           {snapshot.inspectorVisible ? <Inspector snapshot={snapshot} height={layout === "focused" ? Math.max(5, height - focusedLaneHeight) : height} /> : null}
         </Box>

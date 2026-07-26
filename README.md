@@ -3,9 +3,9 @@
 Splitlane is a local terminal UI that keeps Claude Code and Codex in separate
 lanes. It starts in read-only `compare` mode. The current v0.1 preview includes
 an explicit single-writer `build` mode, read-only single/two-lens review,
-metadata-only independent session restore, atomic queues, role handoff packets,
-and opt-in isolated worktrees. There is no automatic routing, grading, merging,
-or review/fix loop.
+one shared meta conversation over independent native child sessions,
+metadata-only restore, atomic queues, role handoff packets, and opt-in isolated
+worktrees. There is no automatic routing, grading, merging, or review/fix loop.
 
 ## Install the v0.1 preview
 
@@ -98,6 +98,21 @@ provider's opaque session/thread ID and never replays prompts; it restores no
 writer lease, approval, queue, or workflow mode. `Ctrl+N` resets only the focused
 lane's Splitlane metadata after confirmation and leaves provider-owned history
 untouched.
+
+Claude's native session and Codex's native thread cannot be the same provider
+identifier, so Splitlane groups them under one visible `meta-session/v1` ID.
+Ordinary user messages and bounded text results form one shared in-memory
+ledger. Before a provider's next requested turn, Splitlane injects every user or
+peer entry that provider has not seen. A Claude-only turn therefore reaches
+Codex when Codex is next invoked, without a hidden synchronization model turn.
+
+Parallel answers cannot see one another while they are being generated; each is
+pending shared context for the next ordinary turn. The header and lane show the
+meta ID, synchronization epoch, pending entry counts, and injected byte count.
+Peer output is delimited as untrusted context and common credential patterns are
+redacted before relay. Shared text is memory-only and is never written to
+session metadata or logs. After restart, matching child IDs are regrouped under
+the same meta ID in a new visible epoch, with no fabricated transcript replay.
 
 Each lane has an independent line viewport. `Page Up` and `Page Down` scroll the
 focused lane, `Home` jumps to its oldest retained output, and `End` resumes

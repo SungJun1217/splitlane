@@ -36,6 +36,7 @@ import { loadFindingPreview } from "../review/preview.ts";
 import { classifyProviderError } from "./provider-error.ts";
 import { SessionStore, type SessionRecord } from "../session/store.ts";
 import { WorktreeManager } from "../worktree/manager.ts";
+import { SharedMetaSession, type MetaDispatch } from "../meta/session.ts";
 
 // Visible M1 routing hypotheses only; this is not the approved v0.1 default profile.
 const M1_PREVIEW_ROLES: RoleProfile = {
@@ -85,6 +86,9 @@ export class CompareOrchestrator {
   readonly #providerVersions = new Map<ProviderId, string | null>();
   readonly #sessionWrites = new Map<ProviderId, Promise<unknown>>();
   #worktreeWrite: Promise<unknown> = Promise.resolve();
+  #metaSession = new SharedMetaSession();
+  readonly #metaDispatches = new Map<ProviderId, MetaDispatch>();
+  readonly #metaTextBuffers = new Map<ProviderId, string>();
   #snapshot: AppSnapshot;
 
   constructor(
@@ -98,6 +102,7 @@ export class CompareOrchestrator {
     this.#sessionStore = config ? new SessionStore(config.stateDirectory, projectRoot) : null;
     this.#worktreeManager = config ? new WorktreeManager(config.stateDirectory, projectRoot) : null;
     this.#snapshot = {
+      metaSession: this.#metaSession.snapshot,
       mode: "compare",
       writer: null,
       writerLease: null,
@@ -235,6 +240,8 @@ export class CompareOrchestrator {
       providerVersion: record.providerVersion,
       updatedAt: record.updatedAt,
       interrupted: !record.clean,
+      metaSessionId: record.metaSessionId,
+      metaEpoch: record.metaEpoch,
     }));
     let recoverable: IsolatedRunSnapshot | null = null;
     let recoverableCount = 0;
@@ -271,6 +278,11 @@ export class CompareOrchestrator {
 
   async restoreSessions(): Promise<void> {
     const records = [...this.#snapshot.restorableSessions];
+    const metaIds = [...new Set(records.map((record) => record.metaSessionId).filter((value): value is string => Boolean(value)))];
+    const restoredMeta = metaIds.length === 1
+      ? new SharedMetaSession(metaIds[0]!, Math.max(0, ...records.map((record) => record.metaEpoch ?? 0)) + 1, true)
+      : new SharedMetaSession(undefined, 1, records.length > 0);
+    this.#metaSession = restoredMeta;
     for (const record of records) {
       const lane = this.#snapshot.lanes[record.provider];
       const currentVersion = this.#providerVersions.get(record.provider) ?? null;
@@ -293,12 +305,20 @@ export class CompareOrchestrator {
         this.#patchLane(record.provider, { error: sanitizeTerminalText((error as Error).message), errorKind: classifyProviderError(error) });
       }
     }
-    this.#patch({ restorableSessions: [], notice: "Session restoration finished independently per provider; no writer authority was restored." });
+    this.#patch({
+      metaSession: this.#metaSession.snapshot,
+      restorableSessions: [],
+      notice: metaIds.length > 1
+        ? "Provider metadata belonged to different meta sessions; child sessions restored under a new visible synchronization epoch. No transcript was replayed."
+        : "Child sessions restored under one shared meta-session epoch; previously delivered native context remains, but no unavailable transcript was replayed.",
+    });
   }
 
   async startNewSessions(): Promise<void> {
     await Promise.allSettled((["claude", "codex"] as const).map((provider) => this.#removeSessionMetadata(provider)));
-    this.#patch({ restorableSessions: [], notice: "Stored Splitlane session metadata removed; provider-owned history was not modified." });
+    this.#metaSession = new SharedMetaSession();
+    this.#sessions.clear();
+    this.#patch({ metaSession: this.#metaSession.snapshot, restorableSessions: [], notice: "Stored Splitlane session metadata removed; a new shared meta session started and provider-owned history was not modified." });
   }
 
   async resetSession(provider: ProviderId): Promise<boolean> {
@@ -307,9 +327,10 @@ export class CompareOrchestrator {
       return false;
     }
     this.#sessions.delete(provider);
+    this.#metaSession.resyncProvider(provider);
     await this.#removeSessionMetadata(provider);
     this.#patchLane(provider, { sessionId: null, effectiveModel: this.#snapshot.lanes[provider].requestedModel, output: "", activities: [], error: null, errorKind: null });
-    this.#patch({ notice: `${provider} Splitlane session metadata reset; the other lane and provider-owned history are unchanged.` });
+    this.#patch({ metaSession: this.#metaSession.snapshot, notice: `${provider} Splitlane session metadata reset; retained shared context will resync on its next turn and the other lane is unchanged.` });
     return true;
   }
 
@@ -318,7 +339,13 @@ export class CompareOrchestrator {
     const session = this.#sessions.get(provider);
     if (!this.#sessionStore || !session?.id) return;
     const prior = this.#sessionWrites.get(provider) ?? Promise.resolve();
-    const write = prior.then(() => this.#sessionStore!.save(provider, session, this.#providerVersions.get(provider) ?? null, clean))
+    const write = prior.then(() => this.#sessionStore!.save(
+      provider,
+      session,
+      this.#providerVersions.get(provider) ?? null,
+      clean,
+      { id: this.#metaSession.id, epoch: this.#metaSession.epoch },
+    ))
       .catch((error) => this.#diagnose(provider, `Session metadata write failed: ${(error as Error).message}`));
     this.#sessionWrites.set(provider, write);
     void write.finally(() => { if (this.#sessionWrites.get(provider) === write) this.#sessionWrites.delete(provider); });
@@ -358,6 +385,7 @@ export class CompareOrchestrator {
       return;
     }
     this.#sessions.delete(provider);
+    this.#metaSession.resyncProvider(provider);
     void this.#removeSessionMetadata(provider);
     this.#patchLane(provider, {
       requestedModel,
@@ -365,7 +393,7 @@ export class CompareOrchestrator {
       modelSource: "request",
       sessionId: null,
     });
-    this.#patch({ notice: `${provider} model set for next request; provider session reset.` });
+    this.#patch({ metaSession: this.#metaSession.snapshot, notice: `${provider} model set for next request; provider session reset and retained shared context marked for resync.` });
   }
 
   #selectedProviders(target: PromptTarget): readonly ProviderId[] {
@@ -575,10 +603,12 @@ export class CompareOrchestrator {
         this.#isolatedGuards.set(provider, guard);
         this.#isolatedLeases.set(provider, lease);
         this.#sessions.delete(provider);
+        this.#metaSession.resyncProvider(provider);
         void this.#removeSessionMetadata(provider);
         this.#patchLane(provider, { sessionId: null, output: "", activities: [], error: null, errorKind: null, status: "READY" });
       }
       this.#patch({
+        metaSession: this.#metaSession.snapshot,
         mode: "isolated",
         writer: null,
         writerLease: null,
@@ -1294,8 +1324,7 @@ export class CompareOrchestrator {
       });
       return false;
     }
-    this.#startQueueItem(item);
-    return true;
+    return this.#startQueueItem(item);
   }
 
   #queueContextMatches(item: QueueItem): boolean {
@@ -1304,13 +1333,26 @@ export class CompareOrchestrator {
       item.writerLeaseId === (this.#snapshot.writerLease?.id ?? null);
   }
 
-  #startQueueItem(item: QueueItem): void {
+  #startQueueItem(item: QueueItem): boolean {
+    let metaDispatches: Record<ProviderId, MetaDispatch | null>;
+    try {
+      metaDispatches = this.#metaSession.prepareTurn(item.target, item.envelope.prompt);
+    } catch (error) {
+      this.#patch({ notice: sanitizeTerminalText((error as Error).message) });
+      return false;
+    }
     if (item.mode === "build" && item.writer && item.providers.includes(item.writer)) this.#lastWriterPrompt = item.envelope.prompt;
     for (const provider of item.providers) {
       this.#patchLane(provider, { status: "STARTING", error: null, errorKind: null, toolSummary: null });
     }
-    this.#patch({ notice: null });
-    void Promise.allSettled(item.providers.map((provider) => this.#runLane(provider, item.envelope, undefined, item.models[provider])));
+    this.#patch({ metaSession: this.#metaSession.snapshot, notice: null });
+    void Promise.allSettled(item.providers.map((provider) => {
+      const metaDispatch = metaDispatches[provider]!;
+      this.#metaDispatches.set(provider, metaDispatch);
+      this.#metaTextBuffers.set(provider, "");
+      return this.#runLane(provider, { ...item.envelope, prompt: metaDispatch.prompt }, undefined, item.models[provider], metaDispatch);
+    }));
+    return true;
   }
 
   async #scheduleQueue(): Promise<void> {
@@ -1338,7 +1380,12 @@ export class CompareOrchestrator {
             break;
           }
           this.#patch({ queue: this.#snapshot.queue.filter((candidate) => candidate.id !== item.id) });
-          this.#startQueueItem(item);
+          if (!this.#startQueueItem(item)) {
+            this.#patch({
+              queue: [...this.#snapshot.queue, Object.freeze({ ...item, status: "needs_confirmation" as const })],
+              notice: "Queued request needs confirmation because the shared context window could not accept it.",
+            });
+          }
           changed = true;
           break;
         }
@@ -1348,9 +1395,10 @@ export class CompareOrchestrator {
     }
   }
 
-  async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism, frozenModel?: string): Promise<void> {
+  async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism, frozenModel?: string, metaDispatch?: MetaDispatch): Promise<void> {
     const adapter = this.adapters[provider];
     this.#markIsolatedProcess(provider, "running");
+    let providerTurnStarted = false;
     try {
       const workspace = this.#workspaceContext(provider);
       let session = this.#sessions.get(provider);
@@ -1385,6 +1433,7 @@ export class CompareOrchestrator {
       const turn = reviewMechanism === "codex_native"
         ? await adapter.startReview!(session, envelope.prompt, turnOptions)
         : await adapter.startTurn(session, envelope.prompt, turnOptions);
+      providerTurnStarted = true;
       this.#patchLane(provider, { turnId: turn.id });
       if (this.#revokeAfterTurn === provider) await this.cancel(provider);
       for await (const providerEvent of turn.events) this.#applyEvent(provider, providerEvent);
@@ -1406,10 +1455,33 @@ export class CompareOrchestrator {
         safetyEffect: null,
       });
       if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+      if (metaDispatch && providerTurnStarted) this.#completeMetaTurn(provider, "failed");
+      else if (metaDispatch) this.#abandonMetaTurn(provider);
     } finally {
       this.#markIsolatedProcess(provider, "idle");
       void this.#scheduleQueue();
     }
+  }
+
+  #completeMetaTurn(provider: ProviderId, outcome: "completed" | "cancelled" | "failed"): void {
+    const dispatch = this.#metaDispatches.get(provider);
+    if (!dispatch) return;
+    this.#metaSession.acknowledge(dispatch);
+    this.#metaSession.appendProviderResult(provider, this.#metaTextBuffers.get(provider) ?? "", outcome);
+    this.#metaDispatches.delete(provider);
+    this.#metaTextBuffers.delete(provider);
+    this.#patch({
+      metaSession: this.#metaSession.snapshot,
+      notice: dispatch.injectedEntries
+        ? `${provider} synchronized ${dispatch.injectedEntries} shared context entr${dispatch.injectedEntries === 1 ? "y" : "ies"} (${dispatch.injectedBytes} bytes).`
+        : this.#snapshot.notice,
+    });
+  }
+
+  #abandonMetaTurn(provider: ProviderId): void {
+    this.#metaDispatches.delete(provider);
+    this.#metaTextBuffers.delete(provider);
+    this.#patch({ metaSession: this.#metaSession.snapshot });
   }
 
   #workspaceContext(provider: ProviderId): { root: string; access: "read_only" | "workspace_write"; lease: WriterLease | null } {
@@ -1468,6 +1540,9 @@ export class CompareOrchestrator {
         this.#patchLane(provider, { status: "RUNNING", turnId: providerEvent.turn_id });
         break;
       case "message.delta":
+        if (this.#metaDispatches.has(provider)) {
+          this.#metaTextBuffers.set(provider, appendBounded(this.#metaTextBuffers.get(provider) ?? "", String(providerEvent.payload.text ?? ""), 32_768));
+        }
         this.#patchLane(provider, {
           output: appendBounded(lane.output, String(providerEvent.payload.text ?? "")),
         });
@@ -1538,6 +1613,7 @@ export class CompareOrchestrator {
         break;
       case "turn.completed":
         this.#resolveApprovalsFor(provider, "cancel_turn");
+        this.#completeMetaTurn(provider, "completed");
         this.#markIsolatedProcess(provider, "idle");
         this.#patchLane(provider, { status: "COMPLETED", turnId: null });
         this.#refreshEvidence();
@@ -1546,6 +1622,7 @@ export class CompareOrchestrator {
         break;
       case "turn.cancelled":
         this.#resolveApprovalsFor(provider, "cancel_turn");
+        this.#completeMetaTurn(provider, "cancelled");
         this.#markIsolatedProcess(provider, "idle");
         this.#patchLane(provider, { status: "CANCELLED", turnId: null });
         this.#refreshEvidence();
@@ -1554,6 +1631,7 @@ export class CompareOrchestrator {
         break;
       case "turn.failed":
         this.#resolveApprovalsFor(provider, "cancel_turn");
+        this.#completeMetaTurn(provider, "failed");
         this.#markIsolatedProcess(provider, "idle");
         this.#diagnose(provider, providerEvent.payload.error ?? "Provider turn failed");
         this.#patchLane(provider, {

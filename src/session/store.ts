@@ -14,6 +14,8 @@ export interface SessionRecord {
   createdAt: string;
   updatedAt: string;
   clean: boolean;
+  metaSessionId: string | null;
+  metaEpoch: number;
 }
 
 export function projectIdentity(projectRoot: string): string {
@@ -23,7 +25,7 @@ export function projectIdentity(projectRoot: string): string {
 function validateRecord(value: unknown, path: string, provider: ProviderId, projectId: string): SessionRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${path} must contain a session-state/v1 object.`);
   const record = value as Record<string, unknown>;
-  const allowed = ["schemaVersion", "provider", "sessionId", "projectId", "requestedModel", "effectiveModel", "providerVersion", "createdAt", "updatedAt", "clean"];
+  const allowed = ["schemaVersion", "provider", "sessionId", "projectId", "requestedModel", "effectiveModel", "providerVersion", "createdAt", "updatedAt", "clean", "metaSessionId", "metaEpoch"];
   const unknown = Object.keys(record).find((key) => !allowed.includes(key));
   if (unknown) throw new Error(`${path}.${unknown} is unknown.`);
   if (record.schemaVersion !== "session-state/v1" || record.provider !== provider || record.projectId !== projectId) throw new Error(`${path} does not match this project/provider.`);
@@ -32,7 +34,13 @@ function validateRecord(value: unknown, path: string, provider: ProviderId, proj
   }
   if (record.providerVersion !== null && typeof record.providerVersion !== "string") throw new Error(`${path}.providerVersion must be a string or null.`);
   if (typeof record.clean !== "boolean") throw new Error(`${path}.clean must be boolean.`);
-  return record as unknown as SessionRecord;
+  if (record.metaSessionId !== undefined && record.metaSessionId !== null && (typeof record.metaSessionId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(record.metaSessionId))) throw new Error(`${path}.metaSessionId must be a safe opaque identifier or null.`);
+  if (record.metaEpoch !== undefined && (!Number.isInteger(record.metaEpoch) || Number(record.metaEpoch) < 0)) throw new Error(`${path}.metaEpoch must be a non-negative integer.`);
+  return {
+    ...(record as unknown as SessionRecord),
+    metaSessionId: typeof record.metaSessionId === "string" ? record.metaSessionId : null,
+    metaEpoch: typeof record.metaEpoch === "number" ? record.metaEpoch : 0,
+  };
 }
 
 export class SessionStore {
@@ -59,7 +67,13 @@ export class SessionStore {
     }
   }
 
-  async save(provider: ProviderId, session: SessionHandle, providerVersion: string | null, clean: boolean): Promise<SessionRecord> {
+  async save(
+    provider: ProviderId,
+    session: SessionHandle,
+    providerVersion: string | null,
+    clean: boolean,
+    meta: { id: string; epoch: number } | null = null,
+  ): Promise<SessionRecord> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const existing = await this.load(provider);
     const now = new Date().toISOString();
@@ -74,6 +88,8 @@ export class SessionStore {
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       clean,
+      metaSessionId: meta?.id ?? null,
+      metaEpoch: meta?.epoch ?? 0,
     };
     const temporary = join(this.directory, `.${provider}.${randomUUID()}.tmp`);
     await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600, flag: "wx" });

@@ -137,10 +137,37 @@ Startup checks:
 
 - Both lanes are read-only.
 - The default target is `BOTH`.
-- The same immutable prompt envelope is sent to both within a bounded dispatch window.
+- Claude and Codex remain native child sessions of one visible Splitlane meta
+  session. The same immutable current-user envelope is sent to both within a
+  bounded dispatch window.
+- The meta session retains a bounded in-memory ledger of user messages and
+  provider text results. Before a provider's next ordinary turn, Splitlane
+  prepends every ledger entry that provider has not yet seen. This makes
+  provider-only turns lazily visible to the other lane without starting hidden
+  synchronization turns.
+- Same-turn parallel answers cannot see each other. They become shared context
+  on the next ordinary turn. Relayed provider text is visibly labeled as
+  untrusted peer output and never receives system-message authority.
 - Output streams independently.
 - Each lane shows requested model, effective model, state, elapsed time, and session indicator.
-- The user may continue either conversation independently.
+- The user may target either lane independently without splitting the visible
+  meta conversation; the inactive lane shows how many context entries remain
+  pending for its next turn.
+
+### 5.2.1 Meta-session persistence boundary
+
+- The user-state session records may persist one opaque Splitlane meta-session
+  ID alongside the two opaque provider session IDs. This groups restoration but
+  does not make the provider-native IDs interchangeable.
+- Shared transcript text remains memory-only in v0.1. It is sanitized and
+  bounded before relay but is not written to configuration, session metadata,
+  manifests, diagnostics, or logs.
+- On a clean restart, provider-native sessions retain context already delivered
+  to them, while an undelivered peer delta cannot be reconstructed. Restoration
+  therefore begins a visibly labeled new synchronization epoch rather than
+  silently replaying or fabricating missing history.
+- Resetting a provider session marks the retained in-memory window unseen for
+  that provider. Model changes use the same explicit resynchronization rule.
 
 ### 5.3 Choose writer
 

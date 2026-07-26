@@ -199,6 +199,8 @@ export interface RestorableSession {
   providerVersion: string | null;
   updatedAt: string;
   interrupted: boolean;
+  metaSessionId?: string | null;
+  metaEpoch?: number;
 }
 
 export interface GitSnapshot {
@@ -347,7 +349,23 @@ export interface IsolatedRunSnapshot {
   error: string | null;
 }
 
+export interface MetaSessionSnapshot {
+  schemaVersion: "meta-session/v1";
+  id: string;
+  epoch: number;
+  turnCount: number;
+  retainedEntries: number;
+  retainedBytes: number;
+  pendingEntries: Record<ProviderId, number>;
+  lastInjectedBytes: Record<ProviderId, number>;
+  truncatedEntries: number;
+  redactedEntries: number;
+  restoredEpoch: boolean;
+  persistence: "metadata_only";
+}
+
 export interface AppSnapshot {
+  metaSession: MetaSessionSnapshot;
   mode: WorkflowMode;
   writer: ProviderId | null;
   writerLease: WriterLease | null;
