@@ -37,6 +37,7 @@ import { configPaths, discoverProjectRoot, loadConfig, parseConfig } from "./con
 import { SessionStore, projectIdentity } from "./session/store.ts";
 import { formatDoctor, runDoctor } from "./compat/doctor.ts";
 import { SharedMetaSession } from "./meta/session.ts";
+import { WorktreeManager } from "./worktree/manager.ts";
 
 type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
 
@@ -63,7 +64,7 @@ class FakeAdapter implements ProviderAdapter {
     this.sessions.push(options);
     return {
       provider: this.provider,
-      id: `${this.provider}-session`,
+      id: this.sessions.length === 1 ? `${this.provider}-session` : `${this.provider}-session-${this.sessions.length}`,
       requestedModel: options.requestedModel,
       effectiveModel: options.requestedModel,
     };
@@ -231,6 +232,16 @@ async function gitResult(root: string, ...args: string[]): Promise<{ exitCode: n
 }
 
 describe("production orchestrator", () => {
+  test("reports capability availability from the probed adapters", async () => {
+    const { orchestrator } = setup();
+    await orchestrator.initialize();
+    expect(orchestrator.getSnapshot().capabilities.find(({ id }) => id === "claude.plan"))
+      .toMatchObject({ status: "available", provider: "claude" });
+    expect(orchestrator.getSnapshot().capabilities.find(({ id }) => id === "codex.native_review"))
+      .toMatchObject({ status: "unavailable", provider: "codex" });
+    await orchestrator.close();
+  });
+
   test("defaults to one focused send route while keeping broadcast explicit", () => {
     const { orchestrator } = setup();
     expect(orchestrator.getSnapshot().focusedProvider).toBe("codex");
@@ -301,8 +312,11 @@ describe("production orchestrator", () => {
     expect(await orchestrator.dispatch("frozen writer request")).toBe(false);
     expect(orchestrator.confirmQueueOffer()).toBe(true);
     orchestrator.setModel("claude", "model-b");
+    expect(orchestrator.getSnapshot().lanes.claude.requestedModel).toBe("model-a");
+    expect(orchestrator.getSnapshot().notice).toContain("cannot change while its lane is active");
     await orchestrator.revokeWriter();
     await waitFor(() => orchestrator.getSnapshot().queue[0]?.status === "needs_confirmation");
+    orchestrator.setModel("claude", "model-b");
     expect(claude.prompts).toEqual(["active writer"]);
     const queued = orchestrator.getSnapshot().queue[0];
     expect(queued?.models.claude).toBe("model-a");
@@ -363,6 +377,7 @@ describe("production orchestrator", () => {
     expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
     orchestrator.setTarget("claude");
     orchestrator.setModel("claude", "claude-test-exact");
+    expect(orchestrator.getSnapshot().lanes.claude.effectiveModel).toBeNull();
     await orchestrator.dispatch("inspect");
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "BLOCKED");
     expect(orchestrator.getSnapshot().approvals).toHaveLength(1);
@@ -371,6 +386,7 @@ describe("production orchestrator", () => {
     const approval = orchestrator.getSnapshot().approvals[0];
     expect(approval && orchestrator.resolveApproval(approval.id, "allow_once")).toBe(true);
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(orchestrator.getSnapshot().lanes.claude.effectiveModel).toBe("claude-test-exact");
     expect(claude.approvalDecisions).toEqual(["allow_once"]);
     orchestrator.setModel("claude", "default");
     expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBeNull();
@@ -786,6 +802,22 @@ describe("local compatibility doctor", () => {
     expect(report.providers.codex.available).toBe(false);
     expect(report.providers.claude.checks[0]?.id).toBe("binary");
   });
+
+  test("fails when the selected project is not a Git repository root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-doctor-non-git-"));
+    const fixture = join(process.cwd(), "test", "fixtures", "fake-doctor-provider.mjs");
+    try {
+      const report = await runDoctor({
+        projectRoot: root,
+        claude: { command: process.execPath, argsPrefix: [fixture, "claude"] },
+        codex: { command: process.execPath, argsPrefix: [fixture, "codex"] },
+      });
+      expect(report.status).toBe("fail");
+      expect(report.workspace.checks[0]).toMatchObject({ id: "git_root", status: "fail" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("configuration", () => {
@@ -924,6 +956,7 @@ describe("terminal rendering", () => {
       branch: "main",
       files: ["한글.txt", "src/a.ts"],
     });
+    expect(parseStatus("## main\nR  old.ts -> new.ts\n")).toEqual({ branch: "main", files: ["new.ts"] });
   });
 
   test("renders a narrow Korean-safe screen without a live terminal", () => {
@@ -981,13 +1014,29 @@ describe("terminal rendering", () => {
       { columns: 240 },
     );
     const ultraWideLines = ultraWideOutput.split("\n");
-    const claudeHeaderIndex = ultraWideLines.findIndex((line) => line.includes("○ CLAUDE") && line.includes("CODE · EVIDENCE"));
+    const claudeHeaderIndex = ultraWideLines.findIndex((line) => line.includes("○ CLAUDE") && line.includes("CODE · CHANGES"));
     const codexHeaderIndex = ultraWideLines.findIndex((line) => line.includes("● CODEX"));
     expect(ultraWideOutput).toContain("VIEW BOTH · DUAL + EVIDENCE");
     expect(ultraWideOutput).not.toContain("COLUMNS");
     expect(claudeHeaderIndex).toBeGreaterThan(0);
     expect(codexHeaderIndex).toBeGreaterThan(claudeHeaderIndex);
     expect(ultraWideLines[claudeHeaderIndex]).not.toContain("CODEX");
+
+    const diffOutput = renderToString(
+      <SplitlaneView snapshot={{ ...snapshot, git: { ...snapshot.git, diff: "@@ -1 +1 @@\n-old\n+new" } }} prompt="" columns={140} rows={40} inspectorTab="diff" inspectorFocused />,
+      { columns: 140 },
+    );
+    expect(diffOutput).toContain("CODE · DIFF");
+    expect(diffOutput).toContain("[DIFF]");
+    expect(diffOutput).toContain("+new");
+
+    const fileOutput = renderToString(
+      <SplitlaneView snapshot={{ ...snapshot, evidencePreview: { file: "src/example.ts", content: "    1 │ const safe = true;", error: null } }} prompt="" columns={140} rows={40} inspectorTab="file" />,
+      { columns: 140 },
+    );
+    expect(fileOutput).toContain("CODE · FILE");
+    expect(fileOutput).toContain("src/example.ts");
+    expect(fileOutput).toContain("const safe = true;");
 
     const noticeOutput = renderToString(
       <SplitlaneView snapshot={{ ...snapshot, notice: "Role handoff requires completed output." }} prompt="" columns={80} rows={24} />,
@@ -1004,7 +1053,7 @@ describe("terminal rendering", () => {
       { columns: 80 },
     );
     expect(focusedOutput).toContain("VIEW FOCUSED");
-    expect(focusedOutput).toContain("CODE · EVIDENCE");
+    expect(focusedOutput).toContain("CODE · CHANGES");
     expect(focusedOutput).toContain("● CODEX");
     expect(focusedOutput).not.toContain("● CLAUDE");
 
@@ -1039,7 +1088,7 @@ describe("terminal rendering", () => {
       <SplitlaneView snapshot={snapshot} prompt="" columns={80} rows={24} overlay="actions" />,
       { columns: 80 },
     );
-    expect(capabilities).toContain("CAPABILITY REFERENCE");
+    expect(capabilities).toContain("CAPABILITIES · RUNTIME STATUS");
     expect(capabilities).toContain("Share bounded peer context");
     expect(capabilities).not.toContain("common.meta_context");
     expect(capabilities.split("\n").length).toBeLessThanOrEqual(24);
@@ -1280,6 +1329,12 @@ describe("M2 workspace guard", () => {
       expect(snapshot.evidence).toContainEqual({ path: "existing.txt", classification: "pre-existing" });
       expect(snapshot.evidence).toContainEqual({ path: "writer.txt", classification: "writer-hinted" });
       expect(snapshot.evidence).toContainEqual({ path: "external.txt", classification: "unknown/external" });
+      expect(await observer.preview("writer.txt")).toMatchObject({
+        file: "writer.txt",
+        content: expect.stringContaining("1 │ provider hint"),
+        error: null,
+      });
+      expect((await observer.preview("../outside.txt")).error).toContain("outside the project");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1347,6 +1402,19 @@ describe("isolated worktree lifecycle", () => {
     const config = await loadConfig(root, { platform: "linux", home: join(outer, "home"), env: {} });
     return { outer, root, config };
   }
+
+  test("reports corrupt retained manifests instead of silently hiding them", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    try {
+      const manager = new WorktreeManager(config.stateDirectory, root);
+      await mkdir(join(manager.root, "corrupt-entry"), { recursive: true });
+      await writeFile(join(manager.root, "corrupt-entry", "manifest.json"), "{not-json");
+      expect(await manager.recoverable()).toEqual([]);
+      expect(manager.recoveryWarnings[0]).toContain("corrupt-entry");
+    } finally {
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
 
   test("previews without writes, then gives each provider an independent writer root", async () => {
     const { outer, root, config } = await isolatedRepository();
@@ -1579,6 +1647,8 @@ describe("M3 reviewer handoff", () => {
       expect(review?.lenses.claude?.envelope.diffHash).toBe(review?.lenses.codex?.envelope.diffHash);
       expect(review?.lenses.claude?.findings[0]?.provider).toBe("claude");
       expect(review?.lenses.codex?.findings[0]?.provider).toBe("codex");
+      expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBe("claude-session");
+      expect(orchestrator.getSnapshot().lanes.codex.sessionId).toBeNull();
       expect(claude.turnOptions.at(-1)?.workspaceAccess).toBe("read_only");
       expect(codex.turnOptions.at(-1)?.workspaceAccess).toBe("read_only");
       expect(orchestrator.selectReviewLens("codex")).toBe(true);
@@ -1866,6 +1936,7 @@ describe("captured provider event compatibility", () => {
     };
     const adapter = new ClaudeAdapter(fakeQuery as never);
     const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    expect(session.effectiveModel).toBeNull();
     const turn = await adapter.startTurn(session, "read only", readOnlyTurnOptions());
     const kinds: NormalizedEvent["kind"][] = [];
     for await (const item of turn.events) kinds.push(item.kind);
@@ -1951,6 +2022,50 @@ describe("captured provider event compatibility", () => {
     await waitFor(() => exitErrors.length > 0);
     expect(exitErrors[0]?.message).toContain("code=17");
     await client.close();
+  });
+
+  test("Codex interrupt failure terminates the provider transport fail-closed", async () => {
+    let closed = 0;
+    const rpc = {
+      start: async () => {},
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread" }, model: "fake", modelProvider: "fake" };
+        if (method === "turn/start") return { turn: { id: "turn" } };
+        if (method === "turn/interrupt") throw new Error("interrupt response lost");
+        return {};
+      },
+      notify: () => {},
+      respond: () => {},
+      close: async () => { closed += 1; },
+    };
+    const adapter = new CodexAdapter({ rpcFactory: () => rpc as never });
+    const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    const turn = await adapter.startTurn(session, "hold", readOnlyTurnOptions());
+    await expect(adapter.interrupt(turn.id)).rejects.toThrow("interrupt response lost");
+    const events: NormalizedEvent[] = [];
+    for await (const item of turn.events) events.push(item);
+    expect(closed).toBe(1);
+    expect(events.at(-1)?.kind).toBe("turn.failed");
+    expect(events.at(-1)?.payload.error).toContain("transport was terminated");
+  });
+
+  test("ambiguous Codex turn start terminates the provider transport", async () => {
+    let closed = 0;
+    const rpc = {
+      start: async () => {},
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread" }, model: "fake", modelProvider: "fake" };
+        if (method === "turn/start") throw new Error("turn/start response lost");
+        return {};
+      },
+      notify: () => {},
+      respond: () => {},
+      close: async () => { closed += 1; },
+    };
+    const adapter = new CodexAdapter({ rpcFactory: () => rpc as never });
+    const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    await expect(adapter.startTurn(session, "ambiguous", readOnlyTurnOptions())).rejects.toThrow("response lost");
+    expect(closed).toBe(1);
   });
 
   test("Codex native review/start streams and cancels through a fake app-server", async () => {

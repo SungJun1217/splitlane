@@ -128,14 +128,14 @@ export class ClaudeAdapter implements ProviderAdapter {
       provider: this.provider,
       id: "",
       requestedModel: options.requestedModel,
-      effectiveModel: options.requestedModel,
+      effectiveModel: null,
     };
   }
 
   async resumeSession(sessionId: string, options: SessionOptions): Promise<SessionHandle> {
     this.#projectRoot = options.projectRoot;
     if (!sessionId.trim()) throw new Error("Claude resume requires a provider session ID.");
-    return { provider: this.provider, id: sessionId, requestedModel: options.requestedModel, effectiveModel: options.requestedModel };
+    return { provider: this.provider, id: sessionId, requestedModel: options.requestedModel, effectiveModel: null };
   }
 
   async startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {

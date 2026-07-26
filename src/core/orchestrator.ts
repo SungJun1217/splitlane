@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   ApprovalDecision,
   AppSnapshot,
+  CapabilitySnapshot,
   HandoffPacket,
   IsolatedRunSnapshot,
   LaneActivity,
@@ -33,7 +34,7 @@ import { isPathInsideWorkspace, WorkspaceGuard } from "../workspace/guard.ts";
 import { captureReviewPatch, createReviewEnvelope, reviewMechanismStability } from "../review/envelope.ts";
 import { buildFindingsRelay, buildReviewPrompt, parseReviewFindings } from "../review/findings.ts";
 import { loadFindingPreview } from "../review/preview.ts";
-import { classifyProviderError } from "./provider-error.ts";
+import { classifyProviderError, ProviderSessionInvalidatedError } from "./provider-error.ts";
 import { SessionStore, type SessionRecord } from "../session/store.ts";
 import { WorktreeManager } from "../worktree/manager.ts";
 import { SharedMetaSession, type MetaDispatch } from "../meta/session.ts";
@@ -53,7 +54,7 @@ const blankLane = (provider: ProviderId, config?: EffectiveConfig): LaneSnapshot
   provider,
   status: "READY",
   requestedModel: config?.providers[provider].model ?? "default",
-  effectiveModel: config?.providers[provider].model ?? "default",
+  effectiveModel: null,
   modelSource: config?.providers[provider].source ?? "provider_default",
   sessionId: null,
   turnId: null,
@@ -66,6 +67,15 @@ const blankLane = (provider: ProviderId, config?: EffectiveConfig): LaneSnapshot
 
 const canAccept = (lane: LaneSnapshot): boolean =>
   ["READY", "COMPLETED", "FAILED", "CANCELLED"].includes(lane.status);
+
+const commonCapabilities: readonly CapabilitySnapshot[] = [
+  { id: "common.send", provider: "common", label: "Send to selected target", access: "Enter", stability: "stable", status: "available", reason: null },
+  { id: "common.meta_context", provider: "common", label: "Share bounded peer context", access: "automatic", stability: "stable", status: "available", reason: null },
+  { id: "common.cancel", provider: "common", label: "Cancel focused lane", access: "Ctrl+X", stability: "stable", status: "available", reason: null },
+  { id: "common.writer", provider: "common", label: "Single-writer lease", access: "Ctrl+B / Ctrl+W", stability: "stable", status: "available", reason: null },
+  { id: "common.approvals", provider: "common", label: "Approval inbox", access: "Ctrl+A", stability: "stable", status: "available", reason: null },
+  { id: "common.review", provider: "common", label: "Read-only review handoff", access: "Ctrl+V", stability: "stable", status: "available", reason: null },
+];
 
 export class CompareOrchestrator {
   readonly #listeners = new Set<() => void>();
@@ -90,6 +100,7 @@ export class CompareOrchestrator {
   #metaSession = new SharedMetaSession();
   readonly #metaDispatches = new Map<ProviderId, MetaDispatch>();
   readonly #metaTextBuffers = new Map<ProviderId, string>();
+  #twoLensPriorSessions: Map<ProviderId, SessionHandle> | null = null;
   #snapshot: AppSnapshot;
 
   constructor(
@@ -132,6 +143,8 @@ export class CompareOrchestrator {
         restoreSessions: config?.ui.restoreSessions ?? "ask",
         updateMode: config?.updates.mode ?? "auto",
       },
+      capabilities: commonCapabilities,
+      evidencePreview: null,
       restorableSessions: [],
       diagnostics: [],
       notice: null,
@@ -260,6 +273,7 @@ export class CompareOrchestrator {
     if (this.#worktreeManager) {
       try {
         const runs = await this.#worktreeManager.recoverable();
+        for (const warning of this.#worktreeManager.recoveryWarnings) this.#diagnose("claude", `Isolated recovery entry ignored: ${warning}`);
         recoverable = runs[0] ?? null;
         recoverableCount = runs.length;
       }
@@ -282,6 +296,14 @@ export class CompareOrchestrator {
           : { ...this.#snapshot.lanes.codex, status: "UNAVAILABLE", error: codexError, errorKind: classifyProviderError(codexError) },
       },
       restorableSessions: this.#snapshot.configuration.restoreSessions === "never" ? [] : restorableSessions,
+      capabilities: [
+        ...commonCapabilities,
+        { id: "claude.plan", provider: "claude", label: "Read-only planning", access: "compare", stability: "stable", status: claude.available ? "available" : "unavailable", reason: claude.error },
+        { id: "claude.build", provider: "claude", label: "Sandboxed build", access: "build", stability: "stable", status: claude.available ? "available" : "unavailable", reason: claude.error },
+        { id: "codex.app_server", provider: "codex", label: "App-server streaming", access: "runtime probe", stability: "preview", status: codex.available && this.#allowPreview ? "available" : codex.available ? "blocked" : "unavailable", reason: codex.available ? this.#allowPreview ? null : "Preview capabilities are disabled." : codex.error },
+        { id: "codex.native_review", provider: "codex", label: "Native review", access: "runtime probe", stability: "preview", status: !codex.available ? "unavailable" : !this.#allowPreview ? "blocked" : this.adapters.codex.reviewMechanisms?.includes("codex_native") ? "available" : "unavailable", reason: !codex.available ? codex.error : !this.#allowPreview ? "Preview capabilities are disabled." : this.adapters.codex.reviewMechanisms?.includes("codex_native") ? null : "Local app-server schema does not advertise review/start." },
+        { id: "codex.workspace_write", provider: "codex", label: "Network-off workspace write", access: "build", stability: "preview", status: codex.available && this.#allowPreview ? "available" : codex.available ? "blocked" : "unavailable", reason: codex.available ? this.#allowPreview ? null : "Preview capabilities are disabled." : codex.error },
+      ],
       isolated: recoverable,
       notice: recoverable ? `${recoverableCount} retained isolated run${recoverableCount === 1 ? "" : "s"} found; inspect, keep, or clean ${recoverable.runId} explicitly.` : this.#snapshot.notice,
     });
@@ -310,6 +332,9 @@ export class CompareOrchestrator {
       }
       try {
         const session = await this.adapters[record.provider].resumeSession(record.sessionId, { projectRoot: this.projectRoot, requestedModel: record.requestedModel });
+        if (!session.effectiveModel || (session.effectiveModel === record.requestedModel && record.effectiveModel !== record.requestedModel)) {
+          session.effectiveModel = record.effectiveModel;
+        }
         this.#sessions.set(record.provider, session);
         this.#patchLane(record.provider, { sessionId: session.id, effectiveModel: session.effectiveModel, error: null, errorKind: null });
       } catch (error) {
@@ -341,19 +366,21 @@ export class CompareOrchestrator {
     this.#sessions.delete(provider);
     this.#metaSession.resyncProvider(provider);
     await this.#removeSessionMetadata(provider);
-    this.#patchLane(provider, { sessionId: null, effectiveModel: this.#snapshot.lanes[provider].requestedModel, output: "", activities: [], error: null, errorKind: null });
+    this.#patchLane(provider, { sessionId: null, effectiveModel: null, output: "", activities: [], error: null, errorKind: null });
     this.#patch({ metaSession: this.#metaSession.snapshot, notice: `${provider} Splitlane session metadata reset; retained shared context will resync on its next turn and the other lane is unchanged.` });
     return true;
   }
 
   #persistSession(provider: ProviderId, clean: boolean): void {
     if (this.#snapshot.mode === "isolated") return;
+    if (this.#snapshot.mode === "review" && this.#snapshot.review?.twoLens) return;
     const session = this.#sessions.get(provider);
-    if (!this.#sessionStore || !session?.id) return;
+    if (!this.#sessionStore || !session?.id || !session.effectiveModel) return;
+    const confirmedSession = { ...session, effectiveModel: session.effectiveModel };
     const prior = this.#sessionWrites.get(provider) ?? Promise.resolve();
     const write = prior.then(() => this.#sessionStore!.save(
       provider,
-      session,
+      confirmedSession,
       this.#providerVersions.get(provider) ?? null,
       clean,
       { id: this.#metaSession.id, epoch: this.#metaSession.epoch },
@@ -396,12 +423,16 @@ export class CompareOrchestrator {
       this.#patch({ notice: `${provider} model ID must be one line and at most 256 characters.` });
       return;
     }
+    if (["STARTING", "RUNNING", "BLOCKED", "CANCELLING"].includes(this.#snapshot.lanes[provider].status)) {
+      this.#patch({ notice: `${provider} model cannot change while its lane is active; cancel or wait for completion first.` });
+      return;
+    }
     this.#sessions.delete(provider);
     this.#metaSession.resyncProvider(provider);
     void this.#removeSessionMetadata(provider);
     this.#patchLane(provider, {
       requestedModel,
-      effectiveModel: requestedModel,
+      effectiveModel: null,
       modelSource: "request",
       sessionId: null,
     });
@@ -1030,10 +1061,11 @@ export class CompareOrchestrator {
         const lens: ReviewLensSnapshot = { provider, mechanism, status: "running", envelope, findings: [], parseError: null };
         return [provider, lens];
       })) as Record<ProviderId, ReviewLensSnapshot>;
+      this.#twoLensPriorSessions = new Map(this.#sessions);
       this.#sessions.delete("claude");
       this.#sessions.delete("codex");
       for (const provider of ["claude", "codex"] as const) {
-        this.#patchLane(provider, { output: "", error: null, errorKind: null, toolSummary: "two-lens read-only review", sessionId: null });
+        this.#patchLane(provider, { output: "", error: null, errorKind: null, toolSummary: "two-lens read-only review", sessionId: null, effectiveModel: null });
       }
       const running: ReviewSnapshot = {
         ...review,
@@ -1062,6 +1094,7 @@ export class CompareOrchestrator {
       void Promise.allSettled((["claude", "codex"] as const).map((provider) => this.#runTwoLens(provider, review.envelope.id)));
       return true;
     } catch (error) {
+      this.#restoreTwoLensSessions();
       this.#patch({ notice: `Two-lens review start failed: ${sanitizeTerminalText((error as Error).message)}` });
       return false;
     } finally {
@@ -1105,10 +1138,26 @@ export class CompareOrchestrator {
     const review = this.#snapshot.review;
     if (!review?.twoLens || review.envelope.id !== reviewId) return;
     const completed = all.filter((item) => item.status === "completed").length;
+    this.#restoreTwoLensSessions();
     this.#patch({
       review: { ...review, status: completed ? "completed" : "failed", stale },
       notice: `Two-lens review finished · Claude ${review.lenses.claude?.status} · Codex ${review.lenses.codex?.status}${stale ? " · STALE" : ""}.`,
     });
+  }
+
+  #restoreTwoLensSessions(): void {
+    const prior = this.#twoLensPriorSessions;
+    if (!prior) return;
+    this.#twoLensPriorSessions = null;
+    for (const provider of ["claude", "codex"] as const) {
+      const session = prior.get(provider);
+      if (session) this.#sessions.set(provider, session);
+      else this.#sessions.delete(provider);
+      this.#patchLane(provider, {
+        sessionId: session?.id || null,
+        effectiveModel: session?.effectiveModel ?? null,
+      });
+    }
   }
 
   selectReviewLens(provider: ProviderId): boolean {
@@ -1466,11 +1515,17 @@ export class CompareOrchestrator {
     } catch (error) {
       this.#diagnose(provider, (error as Error).message);
       this.#markIsolatedProcess(provider, "idle");
+      const invalidated = error instanceof ProviderSessionInvalidatedError;
+      if (invalidated) {
+        this.#sessions.delete(provider);
+        void this.#removeSessionMetadata(provider);
+      }
       this.#patchLane(provider, {
         status: "FAILED",
         error: sanitizeTerminalText((error as Error).message),
         errorKind: classifyProviderError((error as Error).message),
         turnId: null,
+        ...(invalidated ? { sessionId: null, effectiveModel: null } : {}),
       });
       this.#addActivity(provider, {
         id: randomUUID(),
@@ -1710,10 +1765,14 @@ export class CompareOrchestrator {
       await this.adapters[provider].interrupt(lane.turnId);
     } catch (error) {
       this.#diagnose(provider, (error as Error).message);
+      this.#persistSession(provider, false);
+      const invalidated = error instanceof ProviderSessionInvalidatedError;
+      if (invalidated) this.#sessions.delete(provider);
       this.#patchLane(provider, {
         status: "FAILED",
         error: sanitizeTerminalText((error as Error).message),
         errorKind: classifyProviderError((error as Error).message),
+        ...(invalidated ? { sessionId: null, effectiveModel: null, turnId: null } : {}),
       });
       if (this.#snapshot.writer === provider) this.#completeRevocation(provider);
     }
@@ -1721,7 +1780,14 @@ export class CompareOrchestrator {
 
   async refreshGit(): Promise<void> {
     const git = await this.#git.refresh();
-    this.#patch({ git });
+    this.#patch({ git, evidencePreview: this.#snapshot.evidencePreview && git.files.includes(this.#snapshot.evidencePreview.file) ? this.#snapshot.evidencePreview : null });
+  }
+
+  async selectEvidenceFile(path: string): Promise<void> {
+    if (!this.#snapshot.git.files.includes(path)) return;
+    const preview = await this.#git.preview(path);
+    if (!this.#snapshot.git.files.includes(path)) return;
+    this.#patch({ evidencePreview: preview });
   }
 
   #refreshEvidence(): void {

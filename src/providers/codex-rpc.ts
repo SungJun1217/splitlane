@@ -10,6 +10,9 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+export class CodexRpcResponseError extends Error {}
+export class CodexRpcAmbiguousError extends Error {}
+
 export interface RpcMessage {
   id?: number | string;
   method?: string;
@@ -58,7 +61,7 @@ export class CodexRpcClient {
       const error = new Error(`codex app-server exited (code=${code}, signal=${signal})`);
       for (const pending of this.#pending.values()) {
         clearTimeout(pending.timer);
-        pending.reject(error);
+        pending.reject(new CodexRpcAmbiguousError(error.message));
       }
       this.#pending.clear();
       this.#events.emit("exit", error);
@@ -79,7 +82,7 @@ export class CodexRpcClient {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.#pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message ?? "Codex RPC error"));
+      if (message.error) pending.reject(new CodexRpcResponseError(message.error.message ?? "Codex RPC error"));
       else pending.resolve(message.result);
       return;
     }
@@ -95,10 +98,17 @@ export class CodexRpcClient {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
-        reject(new Error(`Timed out waiting for Codex ${method}`));
+        reject(new CodexRpcAmbiguousError(`Timed out waiting for Codex ${method}`));
       }, timeoutMs);
       this.#pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`, (error) => {
+        if (!error) return;
+        const pending = this.#pending.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.#pending.delete(id);
+        pending.reject(new CodexRpcAmbiguousError(`Unable to write Codex ${method}: ${error.message}`));
+      });
     });
   }
 

@@ -78,9 +78,10 @@ directory.
 splitlane doctor /path/to/project
 ```
 
-Doctor checks CLI discovery, versions, coarse authentication status, local
-schemas, sandbox contracts, and transport initialization. It starts zero model
-turns, prints no raw authentication output, and modifies no provider settings.
+Doctor checks that the selected path is the Git repository root, then checks CLI
+discovery, versions, coarse authentication status, local schemas, sandbox
+contracts, and transport initialization. It starts zero model turns, prints no
+raw authentication output, and modifies no provider settings.
 
 For machine-readable diagnostics:
 
@@ -153,7 +154,7 @@ Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
 | View | `Option/Alt+0` both/focused · `Alt+1` focus Claude · `Alt+2` focus Codex |
 | Output | `PgUp/PgDn` scroll · `Home` oldest · `End` follow tail |
 | Workflow | `Ctrl+B` promote writer · `Ctrl+W` revoke · `Ctrl+V` review |
-| Evidence | `Option/Alt+I` inspector · `Ctrl+T` activity · `Ctrl+F` findings |
+| Evidence | `Option/Alt+I` inspector · `Tab` focus · `[`/`]` tabs · `↑`/`↓` changed-file preview · `Ctrl+T` activity · `Ctrl+F` findings |
 | Control | `Ctrl+A` approvals · `Ctrl+X` cancel focused lane · `Ctrl+K` queue |
 | Advanced | `Option/Alt+H` role handoff · `Ctrl+L` isolated worktrees |
 | Settings | `Option/Alt+M` models · `Ctrl+O` roles · `Ctrl+P` capabilities · `Ctrl+U` config |
@@ -232,7 +233,10 @@ Credentials, session IDs, writer leases, and persistent approvals are not valid
 configuration keys.
 
 `default` model selection inherits the provider CLI configuration and passes no
-model override. Exact provider-specific model IDs are also accepted.
+model override. Exact provider-specific model IDs are also accepted. Each lane
+shows the requested value separately from the provider-confirmed effective
+model; a change is refused while that lane is active and applies through a new
+provider session afterward.
 
 ## Sessions, review, and worktrees
 
@@ -252,7 +256,8 @@ Splitlane metadata.
 
 Review freezes an exact objective, criteria, Git base, diff, and diff hash, then
 revokes the writer lease before starting read-only review. Two-lens review runs
-Claude and Codex independently over the same evidence. Findings, failures, and
+Claude and Codex independently over the same evidence in temporary review
+sessions, then restores the original provider sessions. Findings, failures, and
 cancellation remain provider-attributed; they are never merged, graded, or
 declared an agreement.
 

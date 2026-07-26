@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { createReadStream, realpathSync } from "node:fs";
-import { lstat, readlink } from "node:fs/promises";
+import { constants, createReadStream, realpathSync } from "node:fs";
+import { lstat, open, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import type { GitSnapshot } from "../domain.ts";
+import type { GitFilePreview, GitSnapshot } from "../domain.ts";
 import { runCommand } from "../process/child.ts";
+import { sanitizeTerminalText } from "../terminal/sanitize.ts";
+import { isPathInsideWorkspace } from "../workspace/guard.ts";
 
 const EMPTY: GitSnapshot = {
   root: "",
@@ -64,15 +66,25 @@ async function contentHash(root: string, path: string): Promise<string | null> {
 }
 
 export function parseStatus(output: string): { branch: string; files: string[] } {
-  const fields = output.split("\n").filter(Boolean);
+  const nulTerminated = output.includes("\0");
+  const fields = output.split(nulTerminated ? "\0" : "\n").filter(Boolean);
   let branch = "unknown";
   const files: string[] = [];
-  for (const field of fields) {
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index]!;
     if (field.startsWith("## ")) {
       branch = field.slice(3).replace(/^No commits yet on /, "").split("...")[0] ?? "unknown";
       continue;
     }
-    if (field.length >= 4) files.push(field.slice(3));
+    if (field.length < 4) continue;
+    const status = field.slice(0, 2);
+    let path = field.slice(3);
+    if (nulTerminated && /[RC]/.test(status)) {
+      index += 1; // Porcelain -z stores the original path in the following field.
+    } else if (!nulTerminated && /[RC]/.test(status) && path.includes(" -> ")) {
+      path = path.slice(path.lastIndexOf(" -> ") + 4);
+    }
+    files.push(path);
   }
   return { branch, files };
 }
@@ -147,6 +159,30 @@ export class GitObserver {
     this.#baseline = null;
     this.#writerHints.clear();
     this.#snapshot = { ...this.#snapshot, baselineFingerprint: null, evidence: [] };
+  }
+
+  async preview(path: string): Promise<GitFilePreview> {
+    const root = this.#snapshot.root || this.projectRoot;
+    const base = { file: path, content: "" };
+    if (!isPathInsideWorkspace(root, path)) return { ...base, error: "File path is outside the project or escapes through a symlink." };
+    try {
+      const canonical = await realpath(resolve(root, path));
+      if (!isPathInsideWorkspace(root, canonical)) return { ...base, error: "File path resolves outside the project." };
+      const handle = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const metadata = await handle.stat();
+        if (!metadata.isFile()) return { ...base, error: "Selected path is not a regular file." };
+        if (metadata.size > 256 * 1024) return { ...base, error: "Selected file exceeds the 256 KiB preview limit." };
+        const bytes = await handle.readFile();
+        if (bytes.includes(0)) return { ...base, error: "Binary files are not previewed." };
+        const content = bytes.toString("utf8").split("\n").map((line, index) => `${String(index + 1).padStart(5)} │ ${line}`).join("\n");
+        return { ...base, content: sanitizeTerminalText(content), error: null };
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      return { ...base, error: sanitizeTerminalText((error as Error).message) || "Selected file is unavailable." };
+    }
   }
 
   async refresh(): Promise<GitSnapshot> {

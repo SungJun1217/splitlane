@@ -17,9 +17,10 @@ import type {
   ReviewMechanism,
 } from "../domain.ts";
 import { runCommand } from "../process/child.ts";
+import { ProviderSessionInvalidatedError } from "../core/provider-error.ts";
 import { sanitizeIdentifier, sanitizeTerminalText } from "../terminal/sanitize.ts";
 import { isAuthenticWriterLease } from "../workspace/guard.ts";
-import { CodexRpcClient, type RpcMessage } from "./codex-rpc.ts";
+import { CodexRpcClient, CodexRpcResponseError, type RpcMessage } from "./codex-rpc.ts";
 
 interface ThreadStartResponse {
   thread: { id: string };
@@ -235,6 +236,16 @@ export class CodexAdapter implements ProviderAdapter {
     return rpc;
   }
 
+  async #failClosedRpc(rpc: CodexRpcClient, reason: string): Promise<void> {
+    if (this.#rpc === rpc) this.#rpc = null;
+    await rpc.close().catch(() => undefined);
+    for (const active of [...this.#activeByThread.values()]) {
+      if (active.finished) continue;
+      this.#emit(active, "turn.failed", { error: sanitizeTerminalText(reason) });
+      this.#finish(active);
+    }
+  }
+
   async startSession(options: SessionOptions): Promise<SessionHandle> {
     this.#projectRoot = options.projectRoot;
     const rpc = await this.#ensureRpc();
@@ -250,7 +261,7 @@ export class CodexAdapter implements ProviderAdapter {
       provider: this.provider,
       id: response.thread.id,
       requestedModel: options.requestedModel,
-      effectiveModel: sanitizeIdentifier(response.model) || options.requestedModel,
+      effectiveModel: sanitizeIdentifier(response.model) || null,
     };
   }
 
@@ -270,7 +281,7 @@ export class CodexAdapter implements ProviderAdapter {
       provider: this.provider,
       id: response.thread.id,
       requestedModel: options.requestedModel,
-      effectiveModel: sanitizeIdentifier(response.model) || options.requestedModel,
+      effectiveModel: sanitizeIdentifier(response.model) || null,
     };
   }
 
@@ -318,15 +329,21 @@ export class CodexAdapter implements ProviderAdapter {
       if (!active.finished) this.#activeByTurn.set(response.turn.id, active);
       return { id: response.turn.id, events: active.queue };
     } catch (error) {
+      let failure = error as Error;
+      if (!(error instanceof CodexRpcResponseError)) {
+        const message = `Codex turn start became ambiguous; provider transport was terminated: ${(error as Error).message}`;
+        await this.#failClosedRpc(rpc, message);
+        failure = new ProviderSessionInvalidatedError(message, { cause: error });
+      }
       this.#activeByThread.delete(session.id);
       if (active.turnId) this.#activeByTurn.delete(active.turnId);
       active.queue.push(event(this.provider, "turn.failed", {
         sessionId: session.id,
-        payload: { error: sanitizeTerminalText((error as Error).message) },
+        payload: { error: sanitizeTerminalText(failure.message) },
         rawVersion: this.#version,
       }));
       active.queue.close();
-      throw error;
+      throw failure;
     }
   }
 
@@ -367,15 +384,21 @@ export class CodexAdapter implements ProviderAdapter {
       if (!active.finished) this.#activeByTurn.set(response.turn.id, active);
       return { id: response.turn.id, events: active.queue };
     } catch (error) {
+      let failure = error as Error;
+      if (!(error instanceof CodexRpcResponseError)) {
+        const message = `Codex review start became ambiguous; provider transport was terminated: ${(error as Error).message}`;
+        await this.#failClosedRpc(rpc, message);
+        failure = new ProviderSessionInvalidatedError(message, { cause: error });
+      }
       this.#activeByThread.delete(active.threadId);
       if (active.turnId) this.#activeByTurn.delete(active.turnId);
       active.queue.push(event(this.provider, "turn.failed", {
         sessionId: active.threadId,
-        payload: { error: sanitizeTerminalText((error as Error).message) },
+        payload: { error: sanitizeTerminalText(failure.message) },
         rawVersion: this.#version,
       }));
       active.queue.close();
-      throw error;
+      throw failure;
     }
   }
 
@@ -485,7 +508,14 @@ export class CodexAdapter implements ProviderAdapter {
   async interrupt(turnId: string): Promise<void> {
     const active = this.#activeByTurn.get(turnId);
     if (!active || !this.#rpc) return;
-    await this.#rpc.request("turn/interrupt", { threadId: active.threadId, turnId });
+    const rpc = this.#rpc;
+    try {
+      await rpc.request("turn/interrupt", { threadId: active.threadId, turnId });
+    } catch (error) {
+      const message = `Codex interruption could not be confirmed; provider transport was terminated: ${(error as Error).message}`;
+      await this.#failClosedRpc(rpc, message);
+      throw new ProviderSessionInvalidatedError(message, { cause: error });
+    }
   }
 
   async close(): Promise<void> {

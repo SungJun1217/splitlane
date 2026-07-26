@@ -41,6 +41,10 @@ export interface DoctorReport {
     providerConfigModified: false;
     credentialsPersisted: false;
   };
+  workspace: {
+    status: DoctorStatus;
+    checks: readonly DoctorCheck[];
+  };
   providers: Record<"claude" | "codex", ProviderDoctorReport>;
 }
 
@@ -217,9 +221,33 @@ function overall(providers: readonly ProviderDoctorReport[]): DoctorStatus {
   return "pass";
 }
 
+async function doctorWorkspace(projectRoot: string): Promise<DoctorReport["workspace"]> {
+  const top = await runCommand("git", ["rev-parse", "--show-toplevel"], {
+    cwd: projectRoot,
+    timeoutMs: 5_000,
+    maxOutput: 8_192,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+  });
+  const resolvedTop = top.exitCode === 0 ? sanitizeTerminalText(top.stdout).trim() : "";
+  const rootMatches = resolvedTop === projectRoot;
+  const checks = [
+    check(
+      "git_root",
+      rootMatches ? "pass" : "fail",
+      rootMatches
+        ? "Selected project is the Git repository root."
+        : top.available && top.exitCode === 0
+          ? `Selected project is not the repository root; detected ${resolvedTop || "unknown"}.`
+          : "Selected project is not a readable Git repository.",
+    ),
+  ];
+  return { status: checks.some((item) => item.status === "fail") ? "fail" : "pass", checks };
+}
+
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const startedAt = new Date().toISOString();
-  const [claude, codex] = await Promise.all([
+  const [workspace, claude, codex] = await Promise.all([
+    doctorWorkspace(options.projectRoot),
     doctorClaude(options.claude ?? defaultCommand("claude")),
     doctorCodex(options.codex ?? defaultCommand("codex")),
   ]);
@@ -228,7 +256,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     projectRoot: options.projectRoot,
     startedAt,
     completedAt: new Date().toISOString(),
-    status: overall([claude, codex]),
+    status: workspace.status === "fail" ? "fail" : overall([claude, codex]),
     safety: {
       modelTurnsStarted: 0,
       threadsStarted: 0,
@@ -236,6 +264,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       providerConfigModified: false,
       credentialsPersisted: false,
     },
+    workspace,
     providers: { claude, codex },
   };
 }
@@ -245,6 +274,8 @@ export function formatDoctor(report: DoctorReport): string {
     `Splitlane doctor · ${report.status.toUpperCase()} · no model turns or threads started`,
     `project: ${report.projectRoot}`,
   ];
+  lines.push("", `WORKSPACE · ${report.workspace.status.toUpperCase()}`);
+  for (const item of report.workspace.checks) lines.push(`  ${item.status === "pass" ? "✓" : item.status === "warn" ? "!" : "✗"} ${item.id}: ${item.detail}`);
   for (const provider of [report.providers.claude, report.providers.codex]) {
     lines.push("", `${provider.provider.toUpperCase()} · ${provider.version ?? "not found"} · auth ${provider.auth}`);
     for (const item of provider.checks) lines.push(`  ${item.status === "pass" ? "✓" : item.status === "warn" ? "!" : "✗"} ${item.id}: ${item.detail}`);

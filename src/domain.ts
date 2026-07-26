@@ -3,6 +3,7 @@ export type PromptTarget = "both" | ProviderId;
 export type WorkflowMode = "compare" | "build" | "review" | "isolated";
 export type ModelSource = "request" | "project" | "user" | "provider_default";
 export type CapabilityStability = "stable" | "preview" | "experimental";
+export type CapabilityStatus = "available" | "blocked" | "unavailable";
 export type UpdateMode = "auto" | "notify" | "off";
 export type WorkspaceAccess = "read_only" | "workspace_write";
 export type ApprovalDecision = "allow_once" | "deny" | "cancel_turn";
@@ -62,7 +63,7 @@ export interface SessionHandle {
   provider: ProviderId;
   id: string;
   requestedModel: string;
-  effectiveModel: string;
+  effectiveModel: string | null;
 }
 
 export interface SessionOptions {
@@ -138,7 +139,7 @@ export interface LaneSnapshot {
   provider: ProviderId;
   status: LaneStatus;
   requestedModel: string;
-  effectiveModel: string;
+  effectiveModel: string | null;
   modelSource: ModelSource;
   sessionId: string | null;
   turnId: string | null;
@@ -193,6 +194,16 @@ export interface ConfigurationSnapshot {
   updateMode: UpdateMode;
 }
 
+export interface CapabilitySnapshot {
+  id: string;
+  provider: "common" | ProviderId;
+  label: string;
+  access: string;
+  stability: CapabilityStability;
+  status: CapabilityStatus;
+  reason: string | null;
+}
+
 export interface RestorableSession {
   provider: ProviderId;
   sessionId: string;
@@ -222,6 +233,12 @@ export type GitChangeClassification = "pre-existing" | "writer-hinted" | "unknow
 export interface GitFileEvidence {
   path: string;
   classification: GitChangeClassification;
+}
+
+export interface GitFilePreview {
+  file: string;
+  content: string;
+  error: string | null;
 }
 
 export type ReviewMechanism = "claude_generic" | "codex_generic" | "codex_native";
@@ -387,6 +404,8 @@ export interface AppSnapshot {
   queueOffer: QueueItem | null;
   queueLimit: number;
   configuration: ConfigurationSnapshot;
+  capabilities: readonly CapabilitySnapshot[];
+  evidencePreview: GitFilePreview | null;
   restorableSessions: readonly RestorableSession[];
   diagnostics: readonly string[];
   notice: string | null;

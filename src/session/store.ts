@@ -69,7 +69,7 @@ export class SessionStore {
 
   async save(
     provider: ProviderId,
-    session: SessionHandle,
+    session: SessionHandle & { effectiveModel: string },
     providerVersion: string | null,
     clean: boolean,
     meta: { id: string; epoch: number } | null = null,

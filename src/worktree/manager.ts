@@ -23,10 +23,15 @@ function lane(provider: ProviderId, path: string, branch: string, baseCommit: st
 export class WorktreeManager {
   readonly root: string;
   readonly projectRoot: string;
+  readonly #recoveryWarnings: string[] = [];
 
   constructor(readonly stateRoot: string, projectRoot: string) {
     this.projectRoot = realpathSync.native(projectRoot);
     this.root = join(stateRoot, "worktrees", projectIdentity(this.projectRoot));
+  }
+
+  get recoveryWarnings(): readonly string[] {
+    return [...this.#recoveryWarnings];
   }
 
   #validate(run: IsolatedRunSnapshot): void {
@@ -163,6 +168,7 @@ export class WorktreeManager {
   }
 
   async recoverable(): Promise<readonly IsolatedRunSnapshot[]> {
+    this.#recoveryWarnings.length = 0;
     let runIds: string[];
     try { runIds = await readdir(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     const runs: IsolatedRunSnapshot[] = [];
@@ -171,7 +177,9 @@ export class WorktreeManager {
         const value = JSON.parse(await readFile(join(this.root, runId, "manifest.json"), "utf8")) as IsolatedRunSnapshot;
         this.#validate(value);
         if (value.lifecycle !== "cleaned") runs.push(value);
-      } catch {}
+      } catch (error) {
+        this.#recoveryWarnings.push(`${sanitizeTerminalText(runId)}: ${sanitizeTerminalText((error as Error).message) || "invalid isolated manifest"}`);
+      }
     }
     return runs.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }

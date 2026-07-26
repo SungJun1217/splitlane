@@ -8,6 +8,10 @@ test("sanitizes ANSI, OSC, and unsafe control sequences", () => {
   assert.equal(sanitizeTerminalText(input), "safe red text\n");
 });
 
+test("removes C1 and bidirectional spoofing controls", () => {
+  assert.equal(sanitizeTerminalText("safe\u009b31m text\u202Ecodex"), "safe31m textcodex");
+});
+
 test("redacts sensitive fields and home paths recursively", () => {
   const value = redactValue({
     email: "person@example.com",

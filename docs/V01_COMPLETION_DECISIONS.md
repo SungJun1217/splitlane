@@ -188,6 +188,28 @@ The user explicitly approved this revision on 2026-07-27 after clarifying that
 Splitlane must behave as one shared meta conversation rather than two merely
 adjacent conversations.
 
+### 2026-07-27 approved revision — preview stabilization
+
+- An ambiguous Codex `turn/start` or failed `turn/interrupt` must fail closed by
+  terminating that provider transport. Splitlane must not revoke the visible
+  writer lease while an untracked Codex turn may still be running.
+- Model changes are refused while that provider lane is active. Requested and
+  effective models remain distinct, and a provider-confirmed effective model is
+  never fabricated before a new session starts.
+- Two-lens review uses independent review sessions without discarding the
+  original provider session handles. Returning to compare preserves the prior
+  native-session continuity.
+- Runtime capability status, Git/project readiness, and unavailable preview
+  actions must be reported honestly. Static reference copy is not sufficient
+  evidence that a native action is available.
+- The evidence inspector, Git status parser, help copy, and recovery diagnostics
+  are hardened to match the documented v0.1 behavior before the preview is
+  treated as complete.
+
+The user approved this stabilization work on 2026-07-27 after reviewing the
+repository analysis and reproduced failures. The change does not add automatic
+routing, merging, provider turns, or broader write authority.
+
 ### 2026-07-27 approved revision — standalone automatic updates
 
 - GitHub Release standalone installs default to background `auto` checks on TUI

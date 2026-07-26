@@ -1,6 +1,8 @@
 import type { ProviderErrorKind } from "../domain.ts";
 import { sanitizeTerminalText } from "../terminal/sanitize.ts";
 
+export class ProviderSessionInvalidatedError extends Error {}
+
 export function classifyProviderError(message: unknown): ProviderErrorKind {
   const value = sanitizeTerminalText(message).toLowerCase();
   if (/auth|credential|login|unauthori[sz]ed|expired token/.test(value)) return "authentication";

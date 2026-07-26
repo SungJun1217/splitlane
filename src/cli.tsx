@@ -73,6 +73,11 @@ export async function run(argv: readonly string[] = process.argv.slice(2)): Prom
     } else process.stdout.write(output);
     return;
   }
+  if (argv.length > 1 || argv[0]?.startsWith("-")) {
+    console.error(argv[0]?.startsWith("-") ? `Unknown option: ${argv[0]}` : "Splitlane accepts at most one project path.");
+    process.exitCode = 2;
+    return;
+  }
   const requestedRoot = resolve(argv[0] ?? process.cwd());
   const projectRoot = await discoverProjectRoot(requestedRoot);
   let config;

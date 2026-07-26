@@ -2,7 +2,7 @@
 
 Status: architecture validation
 Working title: Splitlane (final name pending)
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## 1. Executive decision
 
@@ -102,6 +102,8 @@ A developer who already has Claude Code and Codex installed and authenticated, w
 - Inline approval inbox if both provider transports can support it reliably.
 - Independent cancellation and failure recovery.
 - Local, non-secret run metadata.
+- Explicit, user-confirmed isolated worktrees with one writer lease per provider,
+  retained branches, and no automatic integration.
 
 ### Excluded
 
@@ -112,7 +114,6 @@ A developer who already has Claude Code and Codex installed and authenticated, w
 - Simultaneous shared-tree writers.
 - Built-in editor, browser, Kanban, PR creation, or remote control.
 - Editing code directly inside the evidence inspector.
-- Worktree-based parallel implementation.
 - Provider installation, credential storage, or direct API fallback.
 - Automatic enabling of experimental provider features.
 
