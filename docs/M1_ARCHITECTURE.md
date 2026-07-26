@@ -52,12 +52,14 @@ the orchestrator or adapters.
 
 Every shortcut is displayed in the footer or its overlay:
 
-- `Enter`: dispatch current prompt to the visible target.
-- `Ctrl+R`: cycle target `BOTH -> CLAUDE -> CODEX`.
-- `Alt+1` / `Alt+2`: focus a lane.
+- `Enter`: open the guided task-flow confirmation or dispatch in direct mode.
+- `Option/Alt+D`: switch between guided task flow and direct prompts.
+- `Ctrl+R`: cycle send route `CLAUDE -> CODEX -> BROADCAST`.
+- `Option/Alt+0`: switch between both-lane and focused-lane views.
+- `Alt+1` / `Alt+2`: focus a lane and select it as the send route.
 - `Ctrl+X`: cancel only the focused lane.
-- `Ctrl+I`: collapse or reveal the evidence inspector.
-- `Ctrl+M`: provider-specific model picker.
+- `Option/Alt+I`: collapse or reveal the evidence inspector.
+- `Option/Alt+M`: provider-specific model picker.
 - `Ctrl+P`: namespaced action palette and capability status.
 - `Ctrl+O`: role-profile override. Overrides never route a prompt automatically.
 - `Ctrl+D`: bounded, sanitized adapter diagnostics.

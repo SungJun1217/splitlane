@@ -37,7 +37,7 @@ const DEFAULT_ROLES: RoleProfile = {
   builder: "codex",
   debugger: "codex",
   intent_reviewer: "claude",
-  correctness_reviewer: "codex",
+  correctness_reviewer: "claude",
 };
 
 function record(value: unknown, path: string): Record<string, unknown> {

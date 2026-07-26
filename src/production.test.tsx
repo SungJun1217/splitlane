@@ -27,8 +27,8 @@ import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCo
 import { CodexRpcClient } from "./providers/codex-rpc.ts";
 import { GitObserver, parseStatus } from "./git/observer.ts";
 import { SplitlaneView } from "./ui/app.tsx";
-import { laneOutputHeight, selectLayout } from "./ui/layout.ts";
-import { removeLastGrapheme, scrollWindow } from "./ui/text.ts";
+import { contentHeight, headerHeight, laneOutputHeight, panelHeights, panelWidths, selectLayout } from "./ui/layout.ts";
+import { fitLines, removeLastGrapheme, scrollWindow, truncateLine } from "./ui/text.ts";
 import { WorkspaceGuard, isPathInsideWorkspace } from "./workspace/guard.ts";
 import { captureReviewPatch, createReviewEnvelope, REVIEW_PATCH_LIMIT } from "./review/envelope.ts";
 import { FINDINGS_END, FINDINGS_START, parseReviewFindings } from "./review/findings.ts";
@@ -231,9 +231,31 @@ async function gitResult(root: string, ...args: string[]): Promise<{ exitCode: n
 }
 
 describe("production orchestrator", () => {
+  test("defaults to one focused send route while keeping broadcast explicit", () => {
+    const { orchestrator } = setup();
+    expect(orchestrator.getSnapshot().focusedProvider).toBe("codex");
+    expect(orchestrator.getSnapshot().target).toBe("codex");
+    orchestrator.cycleTarget();
+    expect(orchestrator.getSnapshot().target).toBe("claude");
+    orchestrator.cycleTarget();
+    expect(orchestrator.getSnapshot().target).toBe("both");
+  });
+
+  test("guided task flow starts only Codex as writer before a confirmed Claude challenge", async () => {
+    const { orchestrator, claude, codex } = setup("complete", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.startGuidedBuild("implement the bounded task", true)).toBe(true);
+    await waitFor(() => orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
+    expect(orchestrator.getSnapshot()).toMatchObject({ mode: "build", writer: "codex", target: "codex", focusedProvider: "codex" });
+    expect(codex.prompts).toEqual(["implement the bounded task"]);
+    expect(claude.prompts).toHaveLength(0);
+    await orchestrator.close();
+  });
+
   test("broadcast reserves both lanes atomically and refuses a second send", async () => {
     const { orchestrator, claude, codex } = setup("hold", "hold");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     expect(await orchestrator.dispatch("same prompt")).toBe(true);
     expect(orchestrator.getSnapshot().lanes.claude.status).toBe("STARTING");
     expect(orchestrator.getSnapshot().lanes.codex.status).toBe("STARTING");
@@ -247,6 +269,7 @@ describe("production orchestrator", () => {
   test("busy broadcast queues one atomic group and waits for both lanes", async () => {
     const { orchestrator, claude, codex } = setup("hold", "hold");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     await orchestrator.dispatch("active pair");
     await waitFor(() => claude.prompts.length === 1 && codex.prompts.length === 1);
     expect(await orchestrator.dispatch("queued pair")).toBe(false);
@@ -309,6 +332,7 @@ describe("production orchestrator", () => {
   test("one lane can fail without cancelling the other", async () => {
     const { orchestrator } = setup("fail", "complete");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     await orchestrator.dispatch("compare");
     await waitFor(() => orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
     expect(orchestrator.getSnapshot().lanes.claude.status).toBe("FAILED");
@@ -319,6 +343,7 @@ describe("production orchestrator", () => {
   test("lane-local cancellation leaves the other lane running", async () => {
     const { orchestrator, claude, codex } = setup("hold", "hold");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     await orchestrator.dispatch("compare");
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "RUNNING");
     await orchestrator.cancel("claude");
@@ -373,6 +398,7 @@ describe("production orchestrator", () => {
   test("one writer lease routes build broadcast as writer plus read-only peer", async () => {
     const { orchestrator, claude, codex } = setup();
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     const promotions = await Promise.all([
       orchestrator.promoteWriter("claude", true),
       orchestrator.promoteWriter("codex", true),
@@ -474,6 +500,7 @@ describe("production orchestrator", () => {
   test("a writer failure revokes the lease while leaving the peer result intact", async () => {
     const { orchestrator } = setup("fail", "complete");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
     await orchestrator.dispatch("writer fails, peer continues");
     await waitFor(() => orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
@@ -526,6 +553,7 @@ describe("production orchestrator", () => {
     const { orchestrator, claude, codex } = setup("complete", "complete");
     await orchestrator.initialize();
     orchestrator.setTarget("claude");
+    orchestrator.focus("claude");
     await orchestrator.dispatch("Scout the repository");
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
     expect(await orchestrator.prepareRoleHandoff("Design the safest implementation plan")).toBe(true);
@@ -608,6 +636,7 @@ describe("shared meta conversation", () => {
   test("parallel lanes receive one current request and each peer result on the next turn", async () => {
     const { orchestrator, claude, codex } = setup("complete", "complete");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     const metaId = orchestrator.getSnapshot().metaSession.id;
     expect(await orchestrator.dispatch("first shared request")).toBe(true);
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED" && orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
@@ -662,6 +691,7 @@ describe("shared meta conversation", () => {
   test("resetting one child session marks the retained shared window for resync", async () => {
     const { orchestrator, codex } = setup("complete", "complete");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     expect(await orchestrator.dispatch("shared before reset")).toBe(true);
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED" && orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
     const before = orchestrator.getSnapshot().metaSession.pendingEntries.codex;
@@ -680,6 +710,7 @@ describe("shared meta conversation", () => {
   test("keeps a failed lane attributable and shares its partial result with the peer later", async () => {
     const { orchestrator, claude, codex } = setup("fail", "complete");
     await orchestrator.initialize();
+    orchestrator.setTarget("both");
     expect(await orchestrator.dispatch("attempt both")).toBe(true);
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "FAILED" && orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
     expect(orchestrator.getSnapshot().metaSession.pendingEntries.codex).toBe(1);
@@ -865,11 +896,20 @@ describe("terminal rendering", () => {
   });
 
   test("selects responsive layouts and handles graphemes", () => {
-    expect(selectLayout(99)).toBe("focused");
+    expect(selectLayout(99)).toBe("stacked");
+    expect(selectLayout(99, "focused")).toBe("focused");
     expect(selectLayout(100)).toBe("stacked");
     expect(selectLayout(180)).toBe("columns");
+    expect(headerHeight(80)).toBe(4);
+    expect(headerHeight(140)).toBe(3);
+    expect(contentHeight(24, 80)).toBe(16);
+    expect(panelHeights(80, 24, true)).toEqual({ content: 16, lane: 7, inspector: 16, showInspector: false });
+    expect(panelHeights(80, 24, true, false, "focused")).toEqual({ content: 16, lane: 9, inspector: 6, showInspector: true });
+    expect(panelWidths(140, true)).toEqual({ lanes: 91, inspector: 48 });
     expect(stringWidth("한글")).toBe(4);
     expect(removeLastGrapheme("A👨‍👩‍👧‍👦한")).toBe("A👨‍👩‍👧‍👦");
+    expect(truncateLine("한글 evidence path", 10)).toBe("한글 evid…");
+    expect(fitLines("one\ntwo\nthree", 10, 2)).toBe("one\n… +2 more");
     expect(laneOutputHeight(90, 30, true)).toBeGreaterThanOrEqual(2);
     expect(scrollWindow("1\n2\n3\n4\n5", 2, 0)).toMatchObject({ content: "4\n5", offset: 0, maxOffset: 3 });
     expect(scrollWindow("1\n2\n3\n4\n5", 2, 2)).toMatchObject({ content: "2\n3", offset: 2, maxOffset: 3 });
@@ -910,28 +950,80 @@ describe("terminal rendering", () => {
     const output = renderToString(<SplitlaneView snapshot={snapshot} prompt="변경점을 비교해줘" columns={90} rows={30} scrollOffsets={{ claude: 1, codex: 0 }} />, { columns: 90 });
     expect(output).toContain("SPLITLANE");
     expect(output).toContain("SCROLLED");
-    expect(output).toContain("한글 검사");
     expect(output).toContain("COMPARE");
     expect(output).toContain("writer NONE");
     expect(output).toContain("meta ");
-    expect(output).toContain("shared sync:");
-    expect(output).toContain("peer relay memory-only");
+    expect(output).toContain("memory 0 B");
+    expect(output).toContain("C [RUNNING] · X [READY]");
+    expect(output).toContain("CLI default");
+    expect(output).toContain("VIEW BOTH");
+    expect(output).toContain("task TASK FLOW");
+    expect(output).toContain("TASK FLOW 변경점을 비교해줘");
+    expect(output.split("\n")).toHaveLength(30);
     expect(output).not.toContain("FOCUSEmode");
-    expect(output).not.toContain("CODEX");
+    expect(output).toContain("CODEX");
+
+    const directOutput = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="직접 질문" columns={90} rows={30} composerMode="direct" />,
+      { columns: 90 },
+    );
+    expect(directOutput).toContain("send CODEX");
+    expect(directOutput).toContain("CODEX 직접 질문");
+
+    const noticeOutput = renderToString(
+      <SplitlaneView snapshot={{ ...snapshot, notice: "Role handoff requires completed output." }} prompt="" columns={80} rows={24} />,
+      { columns: 80 },
+    );
+    expect(noticeOutput.split("\n")).toHaveLength(24);
+    expect(noticeOutput).not.toContain("CODE · EVIDENCE");
+    expect(noticeOutput).toContain("CLAUDE");
+    expect(noticeOutput).toContain("CODEX");
+    expect(noticeOutput).toContain("C [RUNNING] · X [READY]");
+
+    const focusedOutput = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={80} rows={24} viewMode="focused" />,
+      { columns: 80 },
+    );
+    expect(focusedOutput).toContain("VIEW FOCUSED");
+    expect(focusedOutput).toContain("CODE · EVIDENCE");
+    expect(focusedOutput).toContain("● CODEX");
+    expect(focusedOutput).not.toContain("● CLAUDE");
 
     const activity = renderToString(
-      <SplitlaneView snapshot={snapshot} prompt="" columns={90} rows={30} overlay="activity" activityExpanded />,
+      <SplitlaneView snapshot={{ ...snapshot, focusedProvider: "claude" }} prompt="" columns={90} rows={30} overlay="activity" activityExpanded />,
       { columns: 90 },
     );
     expect(activity).toContain("ACTIVITY · SANITIZED + BOUNDED");
     expect(activity).toContain("bun test -- 한글");
     expect(activity).toContain("safety: read-only");
 
+    const flowStart = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="안전하게 구현해줘" columns={80} rows={24} overlay="flow_start" writerConfirm />,
+      { columns: 80 },
+    );
+    expect(flowStart).toContain("TASK FLOW · CODEX BUILD → CLAUDE CHALLENGE · CONFIRM");
+    expect(flowStart).toContain("completion prepares a separate");
+    expect(flowStart).toContain("Claude challenge confirmation");
+    expect(flowStart).not.toContain("Describe the implementation task");
+
     const help = renderToString(
-      <SplitlaneView snapshot={snapshot} prompt="" columns={90} rows={30} overlay="help" />,
-      { columns: 90 },
+      <SplitlaneView snapshot={snapshot} prompt="" columns={80} rows={24} overlay="help" />,
+      { columns: 80 },
     );
     expect(help).toContain("PgUp/PgDn scroll");
+    expect(help).toContain("Option+I inspector");
+    expect(help).not.toContain("Type a prompt");
+    expect(help).toContain("Modal open");
+    expect(help.split("\n").length).toBeLessThanOrEqual(24);
+
+    const capabilities = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={80} rows={24} overlay="actions" />,
+      { columns: 80 },
+    );
+    expect(capabilities).toContain("CAPABILITY REFERENCE");
+    expect(capabilities).toContain("Share bounded peer context");
+    expect(capabilities).not.toContain("common.meta_context");
+    expect(capabilities.split("\n").length).toBeLessThanOrEqual(24);
 
     const queuedSnapshot: AppSnapshot = {
       ...snapshot,
@@ -1104,7 +1196,7 @@ describe("terminal rendering", () => {
     );
     expect(findings).toContain("STALE");
     expect(findings).toContain("한글 경계 오류");
-    expect(findings).toContain("paused CLAUDE");
+    expect(findings).toContain("paused C");
 
     const twoLensSnapshot: AppSnapshot = {
       ...reviewSnapshot,
@@ -1251,6 +1343,7 @@ describe("isolated worktree lifecycle", () => {
       expect(await Bun.file(join(preview.lanes.codex.path, ".git")).exists()).toBe(false);
 
       expect(await orchestrator.startIsolated()).toBe(true);
+      orchestrator.setTarget("both");
       const active = orchestrator.getSnapshot().isolated!;
       expect(orchestrator.getSnapshot().mode).toBe("isolated");
       expect(active.lifecycle).toBe("active");

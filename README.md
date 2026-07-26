@@ -46,7 +46,7 @@ control exactly which provider may write.
 
 | Capability | Behavior |
 |---|---|
-| Parallel prompting | `BOTH` sends one immutable request to Claude Code and Codex at nearly the same time. |
+| Parallel prompting | Explicit `BROADCAST` sends one immutable request to Claude Code and Codex at nearly the same time. |
 | Shared meta conversation | Independent native sessions are grouped into one visible conversation with bounded peer-context relay. |
 | Independent lanes | Models, streaming output, tools, status, cancellation, and failures remain provider-local. |
 | Explicit write control | The safe default is read-only comparison; build mode grants one visible writer lease. |
@@ -94,8 +94,11 @@ splitlane doctor /path/to/project --json
 splitlane /path/to/project
 ```
 
-The initial mode is `COMPARE`, the writer is `NONE`, and the prompt target is
-`BOTH`. Type in the shared editor and press `Enter` to start both provider turns.
+The initial mode is `COMPARE`, the writer is `NONE`, and the view shows both
+lanes. The composer starts in `TASK FLOW`: Enter reviews a Codex-only writer
+grant, then a completed build opens a separate Claude challenge confirmation.
+Use `Option/Alt+D` for direct prompts; `Ctrl+R` then selects Codex, Claude, or
+the explicit `BROADCAST` route.
 
 > [!NOTE]
 > Starting the TUI probes locally installed CLIs but does not start a model
@@ -107,7 +110,7 @@ Claude's native session ID and Codex's native thread ID cannot literally be the
 same identifier. Splitlane keeps both provider sessions intact and groups them
 under one visible `meta-session/v1` identity.
 
-- A `BOTH` request reaches both lanes concurrently.
+- A `BROADCAST` request reaches both lanes concurrently.
 - A Claude-only or Codex-only turn reaches the inactive provider lazily on that
   provider's next real request—never through a hidden paid synchronization turn.
 - Parallel answers cannot see one another while they are being generated. Each
@@ -130,7 +133,7 @@ redaction count. Each lane shows how much shared context it received.
 | `review` | Writer paused | Reviewer read-only | Review a frozen diff without granting reviewer writes. |
 | `isolated` | Own worktree | Own worktree | Parallel implementation in separate worktrees and branches. |
 
-Build mode does not retarget prompts. With target `BOTH`, the selected writer
+Build mode does not retarget prompts. With send route `BROADCAST`, the selected writer
 gets workspace-write access and the peer receives the same request read-only.
 Network access and persistent permission rules remain disabled; supported
 approvals are allow once, deny, or cancel turn.
@@ -141,18 +144,19 @@ Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
 
 | Area | Keys |
 |---|---|
-| Prompt routing | `Enter` send · `Ctrl+R` cycle `BOTH/CLAUDE/CODEX` |
-| Lane focus | `Alt+1` Claude · `Alt+2` Codex |
+| Composer | `Enter` run/send · `Option/Alt+D` task flow/direct |
+| Prompt routing | Direct mode: `Ctrl+R` cycle `CODEX/CLAUDE/BROADCAST` |
+| View | `Option/Alt+0` both/focused · `Alt+1` Claude · `Alt+2` Codex |
 | Output | `PgUp/PgDn` scroll · `Home` oldest · `End` follow tail |
 | Workflow | `Ctrl+B` promote writer · `Ctrl+W` revoke · `Ctrl+V` review |
-| Evidence | `Ctrl+I` inspector · `Ctrl+T` activity · `Ctrl+F` findings |
+| Evidence | `Option/Alt+I` inspector · `Ctrl+T` activity · `Ctrl+F` findings |
 | Control | `Ctrl+A` approvals · `Ctrl+X` cancel focused lane · `Ctrl+K` queue |
-| Advanced | `Ctrl+H` role handoff · `Ctrl+L` isolated worktrees |
-| Settings | `Ctrl+M` models · `Ctrl+O` roles · `Ctrl+P` capabilities · `Ctrl+U` config |
+| Advanced | `Option/Alt+H` role handoff · `Ctrl+L` isolated worktrees |
+| Settings | `Option/Alt+M` models · `Ctrl+O` roles · `Ctrl+P` capabilities · `Ctrl+U` config |
 | Lifecycle | `Ctrl+N` reset focused session · `Ctrl+Q` close and exit |
 
 When a selected lane is busy, Splitlane sends nothing until you explicitly
-queue or cancel the whole request. A `BOTH` request remains one atomic queue
+queue or cancel the whole request. A `BROADCAST` request remains one atomic queue
 group; it never silently reaches only one provider.
 
 ## Automatic updates
@@ -253,7 +257,7 @@ declared an agreement.
 <details>
 <summary><strong>Role handoff packets</strong></summary>
 
-`Ctrl+H` prepares a bounded scout → architect → builder packet with constraints,
+`Option/Alt+H` prepares a bounded scout → architect → builder packet with constraints,
 files, questions, acceptance criteria, source session, and Git fingerprint.
 Confirmation places it in the shared editor but never changes routing or starts
 a provider turn.

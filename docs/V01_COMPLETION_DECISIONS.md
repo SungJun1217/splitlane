@@ -2,7 +2,7 @@
 
 Status: approved for implementation on 2026-07-26
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## Purpose
 
@@ -17,6 +17,56 @@ Implementation proceeds as independently releasable increments. Each increment
 must include offline tests, CJK/narrow rendering checks where relevant, bundle
 and standalone compilation, a clean-checkout packaging check, a scoped commit,
 and a push to `main`.
+
+### 2026-07-27 interactive TUI audit addendum
+
+An interactive 140-column and 80-column PTY audit found three usability defects
+that are approved for correction without changing product authority or routing:
+
+- `Ctrl+I`, `Ctrl+M`, and `Ctrl+H` collide with terminal Tab, Enter, and
+  Backspace control bytes. Evidence toggle, model selection, and role handoff
+  therefore move to `Option+I`, `Option+M`, and `Option+H`. The help overlay and
+  documentation must show the same bindings.
+- The narrow layout must reserve the actual four-row compact header, editor,
+  optional notice, and one-row footer before dividing the remaining viewport.
+  Lane, inspector, and inter-panel gaps must never exceed the declared terminal
+  height. The hidden lane remains visible as a compact independent status. In
+  medium and wide layouts, the terminal lanes retain two thirds of the width so
+  long evidence paths cannot make the read-only inspector become primary.
+- While a modal owns input, the shared prompt editor is hidden and the footer
+  identifies modal state. Startup restore metadata opens on the first render,
+  avoiding a misleading frame where the normal editor briefly appears.
+
+The capability screen is a read-only runtime reference, not a command palette.
+It uses human-readable action names and keeps provider-specific stability
+labels visible. Model source and peer-context status use user-facing wording
+while preserving their existing underlying values.
+
+### 2026-07-27 view and send separation
+
+The user clarified that `BOTH` primarily describes seeing both terminal lanes,
+not an implicit instruction to send every composer submission twice. The UI
+therefore separates these concepts:
+
+- The default view is `BOTH`: Claude is above Codex, with the read-only evidence
+  inspector to their right when width permits. A narrow terminal keeps both
+  lanes stacked and temporarily hides the inspector rather than hiding a lane.
+- `Option/Alt+0` explicitly switches between both-lane and focused-lane views.
+  `Option/Alt+1` and `Option/Alt+2` focus a lane and select it as the send route.
+- The default send route is Codex, matching the initial builder focus. The route is
+  always printed as `send CLAUDE`, `send CODEX`, or `send BROADCAST` in both the
+  header and composer. Only the explicit `BROADCAST` route starts both harnesses.
+- `Ctrl+R` cycles send routes independently of view. Broadcast remains atomic
+  and retains every existing queue, session, and workspace safety rule.
+
+The default composer mode is the human-gated `TASK FLOW`. Enter first opens a
+two-step confirmation that grants Codex the existing single-writer lease and
+dispatches only the confirmed task. After Codex completes, Splitlane prepares
+the existing frozen-diff review dialog for Claude but does not start the Claude
+turn until the user confirms it. Findings never return automatically: the user
+selects them and explicitly requests a Codex revision. `Option/Alt+D` switches
+to `DIRECT`, where the existing Claude, Codex, and Broadcast routes behave as
+before. This adds no automatic debate or unbounded loop.
 
 ## 1. TUI interaction contract
 
@@ -377,3 +427,22 @@ or authorize paid live model turns.
   cadence, forced manual checks, cancellation, config boundaries, UI reporting,
   and installer marker creation. The complete suite passes 104 tests without a
   provider model turn or release-network request.
+
+### 2026-07-27 — Interactive UX and guided task flow
+
+- Separated both-lane/focused viewing from direct Codex, Claude, and Broadcast
+  routing. The default 80-column view keeps both lanes visible; normal-width
+  terminals keep Claude above Codex with the read-only code/evidence inspector
+  on the right.
+- Added the human-gated Task Flow: two confirmations grant Codex the existing
+  single-writer lease and start one build. Completion prepares the existing
+  frozen-diff Claude challenge dialog, but Claude does not start until the user
+  confirms. Selected findings return only through the existing explicit revise
+  action; no automatic debate or unbounded retry was added.
+- Reworked visual hierarchy, compact status, composer modes, modal focus,
+  terminal-safe Option/Alt shortcuts, model/context labels, and evidence line
+  fitting. Interactive 80×24 and 140×40 PTY checks exercised restore, both and
+  focused views, flow confirmation, direct mode, model selection, and clean
+  shutdown without starting a provider model turn. The complete offline suite
+  passes 106 tests, including guided single-writer routing and responsive CJK
+  rendering checks.

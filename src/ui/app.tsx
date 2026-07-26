@@ -3,10 +3,11 @@ import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { AppSnapshot, LaneSnapshot, MetaSessionSnapshot, ProviderId, RoleId } from "../domain.ts";
 import type { CompareOrchestrator } from "../core/orchestrator.ts";
 import { providerErrorAction } from "../core/provider-error.ts";
-import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
-import { lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
+import { laneOutputHeight, panelHeights, panelWidths, selectLayout, type ViewMode } from "./layout.ts";
+import { fitLines, lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | "isolated" | null;
+type Overlay = "flow_start" | "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | "isolated" | null;
+type ComposerMode = "flow" | "direct";
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -17,19 +18,23 @@ const ROLE_IDS: readonly RoleId[] = [
   "correctness_reviewer",
 ];
 
-const ACTIONS = [
-  ["common.prompt", "stable", "Send to selected target"],
-  ["common.meta_context", "stable", "Lazily synchronize bounded peer text into one meta conversation"],
-  ["common.cancel_lane", "stable", "Cancel focused lane only"],
-  ["common.writer_lease", "stable", "Promote or revoke one visible writer"],
-  ["common.approval_inbox", "stable", "Allow once, deny, or cancel turn"],
-  ["common.review_handoff", "stable", "Pause writer and start one read-only review"],
-  ["claude.plan_mode", "stable", "Read-only planning (active)"],
-  ["claude.agent_sdk_write", "stable", "Sandboxed build with temporary approvals"],
-  ["codex.app_server", "preview", "Streaming + lane approvals"],
-  ["codex.native_review", "preview", "Capability-gated app-server review/start"],
-  ["codex.workspace_write", "preview", "Workspace-write build with network off"],
+const CAPABILITIES = [
+  ["COMMON", "Send to selected target", "Enter", "stable"],
+  ["COMMON", "Share bounded peer context", "automatic", "stable"],
+  ["COMMON", "Cancel focused lane", "Ctrl+X", "stable"],
+  ["COMMON", "Single-writer lease", "Ctrl+B / Ctrl+W", "stable"],
+  ["COMMON", "Approval inbox", "Ctrl+A", "stable"],
+  ["COMMON", "Read-only review handoff", "Ctrl+V", "stable"],
+  ["CLAUDE", "Read-only planning", "compare", "stable"],
+  ["CLAUDE", "Sandboxed build", "build", "stable"],
+  ["CODEX", "App-server streaming", "runtime probe", "preview"],
+  ["CODEX", "Native review", "runtime probe", "preview"],
+  ["CODEX", "Network-off workspace write", "build", "preview"],
 ] as const;
+
+function modelSourceLabel(source: LaneSnapshot["modelSource"]): string {
+  return source === "provider_default" ? "CLI default" : `${source} setting`;
+}
 
 function statusColor(status: LaneSnapshot["status"]): string {
   if (status === "FAILED" || status === "UNAVAILABLE") return "red";
@@ -39,31 +44,35 @@ function statusColor(status: LaneSnapshot["status"]): string {
   return "gray";
 }
 
-function Lane({ lane, meta, focused, height, scrollOffset }: { lane: LaneSnapshot; meta: MetaSessionSnapshot; focused: boolean; height: number; scrollOffset: number }) {
+function Lane({ lane, meta, focused, height, scrollOffset, compact = false }: { lane: LaneSnapshot; meta: MetaSessionSnapshot; focused: boolean; height: number; scrollOffset: number; compact?: boolean }) {
   const latestActivity = lane.activities.at(-1);
-  const outputHeight = Math.max(2, height - 6 - (lane.error ? 2 : 0));
+  const outputHeight = Math.max(2, height - (compact ? 4 : 6) - (lane.error ? 2 : 0));
   const viewport = scrollWindow(lane.output || (lane.error ? "" : "No output yet."), outputHeight, scrollOffset);
+  const providerColor = lane.provider === "claude" ? "blue" : "green";
   return (
-    <Box borderStyle={focused ? "double" : "round"} borderColor={focused ? "cyan" : "gray"} flexDirection="column" paddingX={1} height={height} flexGrow={1}>
+    <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} flexDirection="column" paddingX={1} height={height} flexGrow={1}>
       <Box justifyContent="space-between">
-        <Text bold>{lane.provider === "claude" ? "CLAUDE CODE" : "CODEX"}</Text>
-        <Text color={statusColor(lane.status)}>{lane.status}</Text>
+        <Text bold color={providerColor}>{focused ? "●" : "○"} {lane.provider === "claude" ? "CLAUDE" : "CODEX"}</Text>
+        <Text color={statusColor(lane.status)}>[{lane.status}]</Text>
       </Box>
-      <Text dimColor>model: {lane.effectiveModel} ({lane.modelSource})  session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}</Text>
-      <Text color={meta.pendingEntries[lane.provider] ? "yellow" : "gray"}>shared sync: {meta.pendingEntries[lane.provider]} pending · last injected {meta.lastInjectedBytes[lane.provider]} B</Text>
-      <Text color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
-        {latestActivity ? `${latestActivity.kind} · ${latestActivity.status} · ${latestActivity.title}` : "activity · none"}
-        {viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : " · FOLLOW TAIL"}
-      </Text>
-      <Text wrap="wrap">{viewport.content}</Text>
+      <Text dimColor>model: {lane.effectiveModel} ({modelSourceLabel(lane.modelSource)}) · session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}{compact && viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : ""}</Text>
+      {!compact ? <>
+        <Text color={meta.pendingEntries[lane.provider] ? "yellow" : "gray"}>shared: {meta.pendingEntries[lane.provider] ? `${meta.pendingEntries[lane.provider]} pending` : "synced"} · last {meta.lastInjectedBytes[lane.provider]} B</Text>
+        <Text color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
+          {latestActivity ? `${latestActivity.kind} · ${latestActivity.status} · ${latestActivity.title}` : "activity · none"}
+          {viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : " · FOLLOW TAIL"}
+        </Text>
+      </> : null}
+      <Text wrap="wrap" dimColor={!lane.output}>{viewport.content}</Text>
       {lane.error ? <Text color="red">[{lane.errorKind?.toUpperCase() ?? "UNKNOWN"}] {tailLines(lane.error, 1)}{"\n"}{providerErrorAction(lane.errorKind ?? "unknown")}</Text> : null}
     </Box>
   );
 }
 
-function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number }) {
+function Inspector({ snapshot, height, width }: { snapshot: AppSnapshot; height: number; width: number | undefined }) {
   const git = snapshot.git;
   const review = snapshot.review;
+  const bodyWidth = Math.max(10, (width ?? 80) - 4);
   if (review && review.findings.length > 0) {
     const findingsBody = review.findings.map((finding) => {
       const location = finding.file ? `${finding.file}${finding.lineStart ? `:${finding.lineStart}` : ""}` : "general";
@@ -76,10 +85,12 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
       : "";
     const body = [findingsBody, preview].filter(Boolean).join("\n\n");
     return (
-      <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
-        <Text bold>FINDINGS · READ ONLY</Text>
-        <Text dimColor>{review.reviewer} · {review.mechanism} [{review.envelope.mechanismStability}] · {review.envelope.diffHash.slice(0, 8)} · {review.stale ? "STALE" : "CURRENT"}</Text>
-        <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
+      <Box borderStyle="round" borderColor="blue" flexDirection="column" paddingX={1} height={height} width={width} flexGrow={1}>
+        <Box flexDirection="column" flexShrink={0}>
+          <Text bold color="blue">REVIEW · FINDINGS</Text>
+          <Text dimColor>{review.reviewer} · {review.mechanism} [{review.envelope.mechanismStability}] · {review.envelope.diffHash.slice(0, 8)} · {review.stale ? "STALE" : "CURRENT"}</Text>
+        </Box>
+        <Text>{fitLines(body, bodyWidth, Math.max(2, height - 4))}</Text>
       </Box>
     );
   }
@@ -90,10 +101,12 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
       return `${provider.toUpperCase()} · ${lane.processState.toUpperCase()} · ${lane.dirty ? "DIRTY" : "CLEAN"}${lane.error ? " · UNREADABLE" : ""}\n${lane.branch}\n${lane.path}\nhead ${lane.head.slice(0, 12)}${lane.error ? `\n${lane.error}` : ""}`;
     }).join("\n\n");
     return (
-      <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
-        <Text bold>ISOLATED EVIDENCE · PRIMARY READ ONLY</Text>
-        <Text dimColor>{isolated.lifecycle.toUpperCase()} · base {isolated.baseCommit.slice(0, 12)} · no automatic merge</Text>
-        <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
+      <Box borderStyle="round" borderColor="blue" flexDirection="column" paddingX={1} height={height} width={width} flexGrow={1}>
+        <Box flexDirection="column" flexShrink={0}>
+          <Text bold color="blue">CODE · ISOLATED</Text>
+          <Text dimColor>{isolated.lifecycle.toUpperCase()} · base {isolated.baseCommit.slice(0, 12)} · no automatic merge</Text>
+        </Box>
+        <Text>{fitLines(body, bodyWidth, Math.max(2, height - 4))}</Text>
       </Box>
     );
   }
@@ -106,17 +119,20 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
           .filter(Boolean)
           .join("\n\n");
   return (
-    <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
-      <Text bold>EVIDENCE · READ ONLY</Text>
-      <Text dimColor>{git.branch} · {git.dirty ? "DIRTY" : "CLEAN"} · baseline {git.baselineFingerprint?.slice(0, 8) ?? "none"}</Text>
-      <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
+    <Box borderStyle="round" borderColor="blue" flexDirection="column" paddingX={1} height={height} width={width} flexGrow={1}>
+      <Box flexDirection="column" flexShrink={0}>
+        <Text bold color="blue">CODE · EVIDENCE <Text dimColor>READ ONLY</Text></Text>
+        <Text dimColor>{git.branch} · {git.dirty ? "DIRTY" : "CLEAN"} · baseline {git.baselineFingerprint?.slice(0, 8) ?? "none"}</Text>
+      </Box>
+      <Text>{fitLines(body, bodyWidth, Math.max(2, height - 4))}</Text>
     </Box>
   );
 }
 
-function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex, restoreInspect, destructiveConfirm }: {
+function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex, restoreInspect, destructiveConfirm }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
+  taskPrompt: string;
   modelProvider: ProviderId;
   modelDraft: string;
   roleIndex: number;
@@ -132,10 +148,23 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   restoreInspect: boolean;
   destructiveConfirm: boolean;
 }) {
+  if (overlay === "flow_start") {
+    const visibleDirtyFiles = snapshot.git.files.slice(0, 5);
+    return (
+      <Box borderStyle="double" borderColor="cyan" flexDirection="column" paddingX={1}>
+        <Text bold>TASK FLOW · CODEX BUILD → CLAUDE CHALLENGE · {writerConfirm ? "CONFIRM" : "REVIEW"}</Text>
+        <Text>task: {tailLines(taskPrompt, 3)}</Text>
+        <Text>workspace: {snapshot.git.root || "not a Git repository"}</Text>
+        <Text>current changes: {snapshot.git.dirty ? `${visibleDirtyFiles.join(", ")}${snapshot.git.files.length > 5 ? ` (+${snapshot.git.files.length - 5} more)` : ""}` : "clean"}</Text>
+        <Text color="yellow">Codex is the only writer · network off · completion prepares a separate Claude challenge confirmation.</Text>
+        <Text dimColor>{writerConfirm ? "Enter grant Codex lease and start · Esc close" : "Enter review final confirmation · Esc close · Option+D uses direct mode"}</Text>
+      </Box>
+    );
+  }
   if (overlay === "model") {
     return (
       <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
-        <Text bold>MODEL · {modelProvider.toUpperCase()} · source {snapshot.lanes[modelProvider].modelSource}</Text>
+        <Text bold>MODEL · {modelProvider.toUpperCase()} · source {modelSourceLabel(snapshot.lanes[modelProvider].modelSource)}</Text>
         <Text>Exact ID or default: <Text color="cyan">{modelDraft || " "}</Text></Text>
         <Text dimColor>Tab provider · Enter apply to next request · Esc close</Text>
       </Box>
@@ -263,11 +292,13 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
     return (
       <Box borderStyle="double" borderColor="green" flexDirection="column" paddingX={1}>
         <Text bold>HELP · CURRENT ACTIONS ARE ALWAYS VISIBLE</Text>
-        <Text>Prompt: Enter send · Ctrl+R target · Option+1/2 focus</Text>
+        <Text>Composer: Enter task flow · Option+D flow/direct</Text>
+        <Text>Direct: Enter send · Ctrl+R route Codex/Claude/Broadcast</Text>
+        <Text>View: Option+0 both/focused · Option+1/2 focus and select send lane</Text>
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
-        <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics · Ctrl+K queue</Text>
-        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Ctrl+H handoff · Ctrl+L isolated</Text>
-        <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
+        <Text>Evidence: Option+I inspector · Ctrl+T activity · Ctrl+D diagnostics · Ctrl+K queue</Text>
+        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Option+H handoff · Ctrl+L isolated</Text>
+        <Text>Controls: Ctrl+A approvals · Option+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text>Meta session: provider-only turns sync lazily; parallel peer results arrive next ordinary turn</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
@@ -312,9 +343,9 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>{config.loadedUser ? "LOADED" : "missing"} user: {config.userPath}</Text>
         <Text>queue limit: {snapshot.queueLimit} · tools: {config.showTools} · restore: {config.restoreSessions} · updates: {config.updateMode}</Text>
         <Text>preview capabilities: {config.allowPreview ? "enabled" : "disabled"}</Text>
-        <Text>Claude model: {snapshot.lanes.claude.requestedModel} ({snapshot.lanes.claude.modelSource})</Text>
-        <Text>Codex model: {snapshot.lanes.codex.requestedModel} ({snapshot.lanes.codex.modelSource})</Text>
-        <Text color="yellow">Config is read-only in the TUI; Ctrl+M creates a per-request model override.</Text>
+        <Text>Claude model: {snapshot.lanes.claude.requestedModel} ({modelSourceLabel(snapshot.lanes.claude.modelSource)})</Text>
+        <Text>Codex model: {snapshot.lanes.codex.requestedModel} ({modelSourceLabel(snapshot.lanes.codex.modelSource)})</Text>
+        <Text color="yellow">Config is read-only in the TUI; Option+M creates a per-request model override.</Text>
         <Text dimColor>Ctrl+U/Esc close</Text>
       </Box>
     );
@@ -384,20 +415,22 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   }
   return (
     <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
-      <Text bold>ACTION PALETTE · capability aware</Text>
-      {ACTIONS.map(([id, stability, description]) => (
-        <Text key={id}>{id} <Text color={stability === "stable" ? "green" : "gray"}>[{stability}]</Text> · {description}</Text>
+      <Text bold>CAPABILITY REFERENCE · RUNTIME AWARE</Text>
+      {CAPABILITIES.map(([provider, action, access, stability]) => (
+        <Text key={`${provider}-${action}`}>{provider} · {action} · {access} <Text color={stability === "stable" ? "green" : "gray"}>[{stability}]</Text></Text>
       ))}
-      <Text dimColor>Esc/Ctrl+P close</Text>
+      <Text dimColor>Reference only · use the shown shortcut or workflow · Esc/Ctrl+P close</Text>
     </Box>
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0, restoreInspect = false, destructiveConfirm = false }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "both", composerMode = "flow", overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0, restoreInspect = false, destructiveConfirm = false }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
   rows: number;
+  viewMode?: ViewMode;
+  composerMode?: ComposerMode;
   overlay?: Overlay;
   modelProvider?: ProviderId;
   modelDraft?: string;
@@ -415,38 +448,53 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   restoreInspect?: boolean;
   destructiveConfirm?: boolean;
 }) {
-  const layout = selectLayout(columns);
-  const height = contentHeight(rows);
+  const layout = selectLayout(columns, viewMode);
+  const compact = columns < 100;
+  const compactBoth = compact && viewMode === "both";
+  const heights = panelHeights(columns, rows, snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode);
+  const widths = panelWidths(columns, heights.showInspector, viewMode);
   const lanes = layout === "focused" ? [snapshot.focusedProvider] : (["claude", "codex"] as const);
   const laneDirection = layout === "columns" ? "row" : "column";
   const outerDirection = layout === "focused" ? "column" : "row";
-  const laneHeight = layout === "stacked" ? Math.max(5, Math.floor(height / 2)) : height;
-  const focusedLaneHeight = snapshot.inspectorVisible ? Math.max(6, Math.floor(height * 0.65)) : height;
-  const roleSummary = ROLE_IDS.map((role) => `${role.replace("_reviewer", "-rev")}:${snapshot.roles[role] === "claude" ? "C" : "X"}`).join(" · ");
-  const footer = layout === "focused"
-    ? "PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ^L isolated · ⌥1/2 focus · ^Q quit"
-    : "Enter send · PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ^L isolated · ^R target · ^B build · ^V review · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^Q quit";
+  const roleSummary = ["S", "A", "B", "D", "IR", "CR"].map((label, index) => `${label}:${snapshot.roles[ROLE_IDS[index] ?? "scout"] === "claude" ? "C" : "X"}`).join(" ");
+  const focusedLabel = snapshot.focusedProvider === "claude" ? "C" : "X";
+  const sendLabel = snapshot.target === "both" ? "BROADCAST" : snapshot.target.toUpperCase();
+  const composerLabel = composerMode === "flow" ? "TASK FLOW" : sendLabel;
+  const writerLabel = snapshot.mode === "isolated" ? "EACH LANE" : snapshot.writer?.toUpperCase() ?? "NONE";
+  const pausedWriter = snapshot.mode === "review" && snapshot.review ? ` · paused ${snapshot.review.writer === "claude" ? "C" : "X"}` : "";
+  const footer = composerMode === "flow"
+    ? "Enter flow · ⌥D direct · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit"
+    : "Enter send · ^R route · ⌥D flow · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit";
   return (
     <Box flexDirection="column">
-      <Box justifyContent={layout === "focused" ? "flex-start" : "space-between"} flexDirection={layout === "focused" ? "column" : "row"}>
-        <Text bold color="cyan">SPLITLANE · {layout.toUpperCase()}</Text>
-        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{snapshot.mode === "isolated" ? "EACH LANE" : snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
-      </Box>
-      <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text> · epoch {snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · peer relay memory-only {snapshot.metaSession.retainedBytes} B · redacted {snapshot.metaSession.redactedEntries}</Text>
-      <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
-        <Box flexDirection={outerDirection} gap={1}>
-          <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
-            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} scrollOffset={scrollOffsets[provider]} />)}
+      {compact ? <>
+        <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · FOCUS {focusedLabel}</Text> · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
+        <Text><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " REVOKING" : ""}</Text>{pausedWriter} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals {snapshot.approvals.length} · queue {snapshot.queue.length}</Text>
+        <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · memory {snapshot.metaSession.retainedBytes} B</Text>
+        <Text dimColor>flow CODEX → CLAUDE · roles {roleSummary} · manual</Text>
+      </> : <>
+        <Box justifyContent="space-between" flexDirection="row">
+          <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · {layout.toUpperCase()}</Text></Text>
+          <Text><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text></Text>
+        </Box>
+        <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · memory {snapshot.metaSession.retainedBytes} B · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
+        <Text dimColor>flow CODEX BUILD → CLAUDE CHALLENGE · manual gates · roles {roleSummary} · ^O edit</Text>
+      </>}
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} taskPrompt={prompt} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
+        <Box flexDirection={outerDirection} gap={1} height={heights.content}>
+          <Box flexDirection={laneDirection} width={layout === "focused" ? undefined : widths.lanes} flexGrow={heights.showInspector ? 2 : 1} gap={1}>
+            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={heights.lane} scrollOffset={scrollOffsets[provider]} compact={compactBoth} />)}
           </Box>
-          {snapshot.inspectorVisible ? <Inspector snapshot={snapshot} height={layout === "focused" ? Math.max(5, height - focusedLaneHeight) : height} /> : null}
+          {heights.showInspector ? <Inspector snapshot={snapshot} height={heights.inspector} width={layout === "focused" ? undefined : widths.inspector} /> : null}
         </Box>
       )}
-      <Box borderStyle="single" borderColor="gray" paddingX={1}>
-        <Text color="cyan">› </Text><Text>{prompt || "Type a prompt…"}</Text>
-      </Box>
-      {snapshot.notice ? <Text color="yellow">{snapshot.notice}</Text> : null}
-      <Text dimColor>{footer}</Text>
+      {overlay ? <Text dimColor>Modal open · follow the actions above · Esc close · ^Q quit</Text> : <>
+        <Box borderStyle="round" borderColor={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"} paddingX={1}>
+          <Text bold color={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"}> {composerLabel} </Text><Text dimColor={!prompt}>{prompt || (composerMode === "flow" ? "Describe the implementation task…" : "Type a direct prompt…")}</Text>
+        </Box>
+        {snapshot.notice ? <Text color="yellow">{snapshot.notice}</Text> : null}
+        <Text dimColor>{footer}</Text>
+      </>}
     </Box>
   );
 }
@@ -456,7 +504,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   const { columns, rows } = useWindowSize();
   const { exit } = useApp();
   const [prompt, setPrompt] = useState("");
-  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("both");
+  const [composerMode, setComposerMode] = useState<ComposerMode>("flow");
+  const [guidedBuildActive, setGuidedBuildActive] = useState(false);
+  const [overlay, setOverlay] = useState<Overlay>(() => snapshot.restorableSessions.length ? "restore" : null);
   const [modelProvider, setModelProvider] = useState<ProviderId>(snapshot.focusedProvider);
   const [modelDraft, setModelDraft] = useState("");
   const [roleIndex, setRoleIndex] = useState(0);
@@ -521,6 +572,21 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
   }, [snapshot.review?.status]);
 
+  useEffect(() => {
+    if (!guidedBuildActive) return;
+    const status = snapshot.lanes.codex.status;
+    if (status === "COMPLETED" && snapshot.mode === "build" && snapshot.writer === "codex") {
+      setGuidedBuildActive(false);
+      setReviewCriteria("");
+      void orchestrator.prepareReview().then((ready) => {
+        if (ready) setOverlay("review");
+      });
+    } else if (["FAILED", "CANCELLED", "UNAVAILABLE"].includes(status)) {
+      setGuidedBuildActive(false);
+      orchestrator.showNotice(`Task flow stopped after Codex ${status.toLowerCase()}; Claude challenge was not started.`);
+    }
+  }, [guidedBuildActive, snapshot.lanes.codex.status, snapshot.mode, snapshot.writer]);
+
   useInput((input, key) => {
     if (key.ctrl && input === "q") {
       void Promise.allSettled([orchestrator.close(), onBeforeExit?.()]).finally(exit);
@@ -537,6 +603,24 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
     if (overlay === "help") {
       if (key.ctrl && input === "g") setOverlay(null);
+      return;
+    }
+    if (overlay === "flow_start") {
+      if (key.meta && input.toLowerCase() === "d") {
+        setComposerMode("direct");
+        setOverlay(null);
+        setWriterConfirm(false);
+      } else if (key.return && !writerConfirm) setWriterConfirm(true);
+      else if (key.return) {
+        void orchestrator.startGuidedBuild(prompt, snapshot.git.dirty).then((started) => {
+          if (started) {
+            setPrompt("");
+            setGuidedBuildActive(true);
+            setOverlay(null);
+            setWriterConfirm(false);
+          }
+        });
+      }
       return;
     }
     if (overlay === "activity") {
@@ -718,7 +802,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     if (key.pageUp || key.pageDown || key.home || key.end) {
       const provider = snapshot.focusedProvider;
       const lane = snapshot.lanes[provider];
-      const viewportHeight = laneOutputHeight(columns, rows, snapshot.inspectorVisible, Boolean(lane.error));
+      const viewportHeight = laneOutputHeight(columns, rows, snapshot.inspectorVisible, Boolean(lane.error), Boolean(snapshot.notice), viewMode);
       const maximum = maxScrollOffset(lane.output, viewportHeight);
       const page = Math.max(1, viewportHeight - 1);
       setScrollOffsets((current) => ({
@@ -731,11 +815,33 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
               ? Math.min(maximum, current[provider] + page)
               : Math.max(0, current[provider] - page),
       }));
-    } else if (key.meta && input === "1") orchestrator.focus("claude");
-    else if (key.meta && input === "2") orchestrator.focus("codex");
-    else if (key.ctrl && input === "r") orchestrator.cycleTarget();
+    } else if (key.meta && input.toLowerCase() === "d") {
+      setComposerMode((current) => {
+        const next = current === "flow" ? "direct" : "flow";
+        if (next === "flow") {
+          orchestrator.focus("codex");
+          orchestrator.setTarget("codex");
+        }
+        return next;
+      });
+    }
+    else if (key.meta && input === "0") setViewMode((current) => current === "both" ? "focused" : "both");
+    else if (key.meta && input === "1") {
+      setComposerMode("direct");
+      orchestrator.focus("claude");
+      orchestrator.setTarget("claude");
+    }
+    else if (key.meta && input === "2") {
+      setComposerMode("direct");
+      orchestrator.focus("codex");
+      orchestrator.setTarget("codex");
+    }
+    else if (key.ctrl && input === "r") {
+      setComposerMode("direct");
+      orchestrator.cycleTarget();
+    }
     else if (key.ctrl && input === "x") void orchestrator.cancel(snapshot.focusedProvider);
-    else if (key.ctrl && input === "i") orchestrator.toggleInspector();
+    else if (key.meta && input.toLowerCase() === "i") orchestrator.toggleInspector();
     else if (key.ctrl && input === "v") {
       setReviewCriteria("");
       void orchestrator.prepareReview().then((ready) => { if (ready) setOverlay("review"); });
@@ -765,7 +871,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       setApprovalIndex(0);
       setOverlay("approval");
     }
-    else if (key.ctrl && input === "m") {
+    else if (key.meta && input.toLowerCase() === "m") {
       setModelProvider(snapshot.focusedProvider);
       setModelDraft(snapshot.lanes[snapshot.focusedProvider].requestedModel);
       setOverlay("model");
@@ -786,7 +892,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       setDestructiveConfirm(false);
       setOverlay("reset_session");
     }
-    else if (key.ctrl && input === "h") {
+    else if (key.meta && input.toLowerCase() === "h") {
       void orchestrator.prepareRoleHandoff(prompt).then((ready) => { if (ready) setOverlay("handoff"); });
     }
     else if (key.ctrl && input === "l") {
@@ -799,10 +905,17 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       setRoleProvider(snapshot.roles[ROLE_IDS[roleIndex] ?? "scout"]);
       setOverlay("roles");
     } else if (key.return) {
-      void orchestrator.dispatch(prompt).then((sent) => { if (sent) setPrompt(""); });
+      if (composerMode === "flow") {
+        if (!prompt.trim()) orchestrator.showNotice("Task is empty.");
+        else if (snapshot.mode !== "compare") orchestrator.showNotice("Task Flow starts only from compare mode; finish or revoke the current workflow first.");
+        else {
+          setWriterConfirm(false);
+          setOverlay("flow_start");
+        }
+      } else void orchestrator.dispatch(prompt).then((sent) => { if (sent) setPrompt(""); });
     } else if (key.backspace || key.delete) setPrompt(removeLastGrapheme(prompt));
     else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} viewMode={viewMode} composerMode={composerMode} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} />;
 }

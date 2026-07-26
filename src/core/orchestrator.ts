@@ -46,7 +46,7 @@ const M1_PREVIEW_ROLES: RoleProfile = {
   builder: "codex",
   debugger: "codex",
   intent_reviewer: "claude",
-  correctness_reviewer: "codex",
+  correctness_reviewer: "claude",
 };
 
 const blankLane = (provider: ProviderId, config?: EffectiveConfig): LaneSnapshot => ({
@@ -108,8 +108,8 @@ export class CompareOrchestrator {
       writer: null,
       writerLease: null,
       writerRevoking: false,
-      target: "both",
-      focusedProvider: "claude",
+      target: "codex",
+      focusedProvider: "codex",
       inspectorVisible: config?.ui.inspector ?? true,
       lanes: { claude: blankLane("claude", config), codex: blankLane("codex", config) },
       git: this.#git.snapshot,
@@ -373,9 +373,9 @@ export class CompareOrchestrator {
   }
 
   cycleTarget(): void {
-    const targets: PromptTarget[] = ["both", "claude", "codex"];
+    const targets: PromptTarget[] = ["codex", "claude", "both"];
     const index = targets.indexOf(this.#snapshot.target);
-    this.setTarget(targets[(index + 1) % targets.length] ?? "both");
+    this.setTarget(targets[(index + 1) % targets.length] ?? "codex");
   }
 
   focus(provider: ProviderId): void {
@@ -791,6 +791,20 @@ export class CompareOrchestrator {
     } finally {
       this.#promotionPending = false;
     }
+  }
+
+  async startGuidedBuild(prompt: string, dirtyTreeAcknowledged: boolean): Promise<boolean> {
+    if (!prompt.trim()) {
+      this.#patch({ notice: "Task is empty." });
+      return false;
+    }
+    const promoted = await this.promoteWriter("codex", dirtyTreeAcknowledged);
+    if (!promoted) return false;
+    this.setTarget("codex");
+    this.focus("codex");
+    const sent = await this.dispatch(prompt);
+    if (!sent) await this.revokeWriter();
+    return sent;
   }
 
   async revokeWriter(): Promise<void> {

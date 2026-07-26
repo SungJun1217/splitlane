@@ -56,7 +56,7 @@
   <g transform="translate(853 66)">
     <rect width="270" height="38" rx="19" fill="#111827" stroke="#334155"/>
     <circle cx="22" cy="19" r="5" fill="#34D399" filter="url(#laneGlow)"/>
-    <text x="38" y="24" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">COMPARE · BOTH · NO WRITER</text>
+    <text x="38" y="24" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">COMPARE · VIEW BOTH · TASK FLOW · NO WRITER</text>
   </g>
 
   <!-- Terminal frame -->
@@ -65,7 +65,7 @@
   <circle cx="84" cy="183" r="5" fill="#FB7185"/>
   <circle cx="103" cy="183" r="5" fill="#FBBF24"/>
   <circle cx="122" cy="183" r="5" fill="#34D399"/>
-  <text x="146" y="188" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">splitlane · meta 7f3a9c1e · epoch 1 · peer relay memory-only</text>
+  <text x="146" y="188" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">splitlane · meta 7f3a9c1e/e1 · shared context memory-only</text>
 
   <!-- Claude lane -->
   <rect x="82" y="218" width="305" height="116" rx="10" fill="#0B1420" stroke="#155E75"/>
@@ -93,7 +93,7 @@
 
   <!-- Evidence panel -->
   <rect x="724" y="218" width="394" height="116" rx="10" fill="#0B1514" stroke="#166534"/>
-  <text x="744" y="242" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" letter-spacing="1.2">EVIDENCE · READ ONLY</text>
+  <text x="744" y="242" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" letter-spacing="1.2">CODE · EVIDENCE · READ ONLY</text>
   <text x="744" y="267" fill="#94A3B8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">M  src/core/orchestrator.ts</text>
   <text x="744" y="285" fill="#94A3B8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">A  src/meta/session.ts</text>
   <text x="744" y="303" fill="#34D399" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">+ 42</text>
@@ -105,7 +105,7 @@
   <text x="102" y="380" fill="#67E8F9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700">›</text>
   <text x="126" y="379" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">Review this change and explain the safest implementation…</text>
   <rect x="1017" y="362" width="81" height="24" rx="12" fill="#78350F" stroke="#F59E0B" stroke-opacity=".55"/>
-  <text x="1041" y="378" fill="#FCD34D" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700">BOTH</text>
+  <text x="1013" y="378" fill="#67E8F9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700">TASK FLOW</text>
 
   <text x="600" y="452" text-anchor="middle" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.5">COMPARE SAFELY  ·  BUILD EXPLICITLY  ·  REVIEW WITH EVIDENCE</text>
 </svg>

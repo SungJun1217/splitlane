@@ -136,7 +136,12 @@ Startup checks:
 ### 5.2 Compare
 
 - Both lanes are read-only.
-- The default target is `BOTH`.
+- The default view shows both lanes; the default send route is `CODEX`, which
+  matches the initial focused builder lane. Sending to both is the explicit
+  `BROADCAST` route.
+- The default composer uses the human-gated Codex-build → Claude-challenge
+  workflow. Direct provider prompts and Broadcast remain available through an
+  explicit composer-mode switch.
 - Claude and Codex remain native child sessions of one visible Splitlane meta
   session. The same immutable current-user envelope is sent to both within a
   bounded dispatch window.
@@ -224,7 +229,7 @@ The terminal workspace always has visual and keyboard priority. The inspector is
 │                        │                       │ + current                          │
 ├────────────────────────┴───────────────────────┤                                    │
 │ target: BOTH  prompt…                          │                                    │
-└ Enter send · Alt+1/2 lane · Ctrl+I inspector ─┴────────────────────────────────────┘
+└ Enter send · Alt+1/2 lane · Alt+I inspector ─┴─────────────────────────────────────┘
 ```
 
 Suggested width allocation: terminal workspace 68–72%, inspector 28–32%. Three columns are used only when both agent lanes remain above their minimum readable width.
@@ -291,10 +296,10 @@ Proposed actions:
 |---|---|
 | Focus Claude lane | `Alt+1` |
 | Focus Codex lane | `Alt+2` |
-| Focus/toggle inspector | `Ctrl+I` |
+| Focus/toggle inspector | `Option/Alt+I` |
 | Cycle inspector tabs | `[` / `]` while inspector is focused |
 | Change prompt target | Action palette or explicit target control |
-| Model picker | `Ctrl+M` |
+| Model picker | `Option/Alt+M` |
 | Action palette | `Ctrl+P` |
 | Help | `?` when composer is not editing |
 
@@ -722,7 +727,7 @@ Native actions cannot weaken the current workspace mode. A Claude or Codex nativ
 
 ### UX
 
-`Ctrl+M` opens one dialog with separate Claude and Codex sections.
+`Option/Alt+M` opens one dialog with separate Claude and Codex sections.
 
 Each shows:
 
@@ -834,7 +839,7 @@ workflow:
     builder: codex
     debugger: codex
     intent_reviewer: claude
-    correctness_reviewer: codex
+    correctness_reviewer: claude
 ui:
   layout: auto
   tool_details: collapsed
