@@ -5,7 +5,7 @@ import type { CompareOrchestrator } from "../core/orchestrator.ts";
 import { contentHeight, selectLayout } from "./layout.ts";
 import { removeLastGrapheme, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -21,6 +21,7 @@ const ACTIONS = [
   ["common.cancel_lane", "stable", "Cancel focused lane only"],
   ["common.writer_lease", "stable", "Promote or revoke one visible writer"],
   ["common.approval_inbox", "stable", "Allow once, deny, or cancel turn"],
+  ["common.review_handoff", "stable", "Pause writer and start one read-only review"],
   ["claude.plan_mode", "stable", "Read-only planning (active)"],
   ["claude.agent_sdk_write", "stable", "Sandboxed build with temporary approvals"],
   ["codex.app_server", "preview", "Streaming + lane approvals"],
@@ -53,6 +54,26 @@ function Lane({ lane, focused, height }: { lane: LaneSnapshot; focused: boolean;
 
 function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number }) {
   const git = snapshot.git;
+  const review = snapshot.review;
+  if (review && review.findings.length > 0) {
+    const findingsBody = review.findings.map((finding) => {
+      const location = finding.file ? `${finding.file}${finding.lineStart ? `:${finding.lineStart}` : ""}` : "general";
+      return `${finding.id === review.activeFindingId ? ">" : " "}${finding.selected ? "[x]" : "[ ]"} ${finding.severity.toUpperCase()} · ${location}\n${finding.title}`;
+    }).join("\n\n");
+    const preview = review.preview
+      ? review.preview.error
+        ? `PREVIEW · ${review.preview.file}\n${review.preview.error}`
+        : `PREVIEW · ${review.preview.file}\n${review.preview.content}`
+      : "";
+    const body = [findingsBody, preview].filter(Boolean).join("\n\n");
+    return (
+      <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
+        <Text bold>FINDINGS · READ ONLY</Text>
+        <Text dimColor>{review.reviewer} · {review.mechanism} · {review.envelope.diffHash.slice(0, 8)} · {review.stale ? "STALE" : "CURRENT"}</Text>
+        <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
+      </Box>
+    );
+  }
   const evidence = git.evidence.map(({ path, classification }) => `[${classification}] ${path}`);
   const body = git.error
     ? git.error
@@ -70,7 +91,7 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
   );
 }
 
-function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex }: {
+function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
   modelProvider: ProviderId;
@@ -79,6 +100,9 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   writerProvider: ProviderId;
   writerConfirm: boolean;
   approvalIndex: number;
+  reviewCriteria: string;
+  findingIndex: number;
+  staleAcknowledged: boolean;
 }) {
   if (overlay === "model") {
     return (
@@ -144,6 +168,39 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
       </Box>
     );
   }
+  if (overlay === "review") {
+    const review = snapshot.review;
+    if (!review) return <Text>Review draft unavailable. Esc close.</Text>;
+    const files = review.envelope.files.slice(0, 5).map(({ path }) => path).join(", ");
+    return (
+      <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
+        <Text bold>START REVIEW · REVOKE WRITER THEN READ ONLY</Text>
+        <Text>{review.writer.toUpperCase()} → {review.reviewer.toUpperCase()} · {review.mechanism}</Text>
+        <Text>base: {review.envelope.head.slice(0, 12)} · diff {review.envelope.diffBytes} bytes · {review.envelope.diffHash.slice(0, 12)}</Text>
+        <Text>files: {files}{review.envelope.files.length > 5 ? ` (+${review.envelope.files.length - 5} more)` : ""}</Text>
+        <Text>objective: {tailLines(review.envelope.objective, 2)}</Text>
+        <Text>acceptance criteria: <Text color="cyan">{reviewCriteria || " "}</Text></Text>
+        <Text color="yellow">Enter revokes the writer lease before dispatch. Network and writes stay off.</Text>
+        <Text dimColor>Type criteria · Enter start · Esc keep build</Text>
+      </Box>
+    );
+  }
+  if (overlay === "findings") {
+    const review = snapshot.review;
+    const finding = review?.findings[findingIndex] ?? review?.findings[0];
+    return (
+      <Box borderStyle="double" borderColor={review?.stale ? "red" : "magenta"} flexDirection="column" paddingX={1}>
+        <Text bold>REVIEW FINDINGS · {review?.status.toUpperCase() ?? "NONE"} · {review?.stale ? "STALE" : "CURRENT"}</Text>
+        {finding ? <>
+          <Text>{finding.selected ? "[x]" : "[ ]"} {finding.severity.toUpperCase()} · {finding.title}</Text>
+          <Text>{finding.file ?? "general"}{finding.lineStart ? `:${finding.lineStart}` : ""}</Text>
+          <Text>{tailLines(finding.body, 5)}</Text>
+          {finding.verification ? <Text dimColor>verify: {finding.verification}</Text> : null}
+        </> : <Text>{review?.parseError ?? (review?.status === "running" ? "Review is running…" : "No structured findings.")}</Text>}
+        <Text dimColor>↑/↓ finding · Space select · A accept · E exit · S stale ack ({staleAcknowledged ? "yes" : "no"}) · R return selected</Text>
+      </Box>
+    );
+  }
   return (
     <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
       <Text bold>ACTION PALETTE · capability aware</Text>
@@ -155,7 +212,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0 }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
@@ -167,6 +224,9 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   writerProvider?: ProviderId;
   writerConfirm?: boolean;
   approvalIndex?: number;
+  reviewCriteria?: string;
+  findingIndex?: number;
+  staleAcknowledged?: boolean;
 }) {
   const layout = selectLayout(columns);
   const height = contentHeight(rows);
@@ -180,10 +240,10 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
     <Box flexDirection="column">
       <Box justifyContent="space-between">
         <Text bold color="cyan">SPLITLANE</Text>
-        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text> · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
+        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} /> : (
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} /> : (
         <Box flexDirection={outerDirection} gap={1}>
           <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
             {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} />)}
@@ -195,7 +255,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
         <Text color="cyan">› </Text><Text>{prompt || "Type a prompt…"}</Text>
       </Box>
       {snapshot.notice ? <Text color="yellow">{snapshot.notice}</Text> : null}
-      <Text dimColor>Enter send · ^R target · ^B build · ^W revoke · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^M model · ^P actions · ^O roles · ^D diagnostics · ^Q quit</Text>
+      <Text dimColor>Enter send · ^R target · ^B build · ^V review · ^F findings · ^W revoke · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^M model · ^P actions · ^O roles · ^D diagnostics · ^Q quit</Text>
     </Box>
   );
 }
@@ -213,6 +273,9 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   const [writerProvider, setWriterProvider] = useState<ProviderId>(snapshot.focusedProvider);
   const [writerConfirm, setWriterConfirm] = useState(false);
   const [approvalIndex, setApprovalIndex] = useState(0);
+  const [reviewCriteria, setReviewCriteria] = useState("");
+  const [findingIndex, setFindingIndex] = useState(0);
+  const [staleAcknowledged, setStaleAcknowledged] = useState(false);
 
   useEffect(() => {
     if (snapshot.approvals.length > 0) {
@@ -220,6 +283,16 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       setOverlay("approval");
     } else if (overlay === "approval") setOverlay(null);
   }, [snapshot.approvals.length]);
+
+  useEffect(() => {
+    if (snapshot.mode === "review" && snapshot.review && snapshot.review.status !== "running") {
+      setFindingIndex(0);
+      setStaleAcknowledged(false);
+      setOverlay("findings");
+      const first = snapshot.review.findings[0];
+      if (first) void orchestrator.selectFinding(first.id);
+    }
+  }, [snapshot.review?.status]);
 
   useInput((input, key) => {
     if (key.ctrl && input === "q") {
@@ -285,13 +358,62 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       }
       return;
     }
+    if (overlay === "review") {
+      if (key.return) {
+        void orchestrator.startReview(reviewCriteria).then((started) => { if (started) setOverlay(null); });
+      } else if (key.backspace || key.delete) setReviewCriteria(removeLastGrapheme(reviewCriteria));
+      else if (!key.ctrl && !key.meta) setReviewCriteria((current) => current + input);
+      return;
+    }
+    if (overlay === "findings") {
+      const count = Math.max(1, snapshot.review?.findings.length ?? 0);
+      if (key.upArrow) {
+        const next = (findingIndex - 1 + count) % count;
+        setFindingIndex(next);
+        const finding = snapshot.review?.findings[next];
+        if (finding) void orchestrator.selectFinding(finding.id);
+      } else if (key.downArrow) {
+        const next = (findingIndex + 1) % count;
+        setFindingIndex(next);
+        const finding = snapshot.review?.findings[next];
+        if (finding) void orchestrator.selectFinding(finding.id);
+      }
+      else {
+        const finding = snapshot.review?.findings[findingIndex] ?? snapshot.review?.findings[0];
+        if (input === " " && finding) orchestrator.toggleFinding(finding.id);
+        else if (input.toLowerCase() === "a" && orchestrator.finishReview("accept")) setOverlay(null);
+        else if (input.toLowerCase() === "e" && orchestrator.finishReview("exit")) setOverlay(null);
+        else if (input.toLowerCase() === "s" && snapshot.review?.stale) setStaleAcknowledged((value) => !value);
+        else if (input.toLowerCase() === "r" && snapshot.review) {
+          const relay = orchestrator.returnSelectedFindings(staleAcknowledged);
+          if (relay) {
+            setPrompt(relay);
+            setWriterProvider(snapshot.review.writer);
+            setWriterConfirm(false);
+            setOverlay("writer");
+          }
+        }
+      }
+      return;
+    }
     if (key.meta && input === "1") orchestrator.focus("claude");
     else if (key.meta && input === "2") orchestrator.focus("codex");
     else if (key.ctrl && input === "r") orchestrator.cycleTarget();
     else if (key.ctrl && input === "x") void orchestrator.cancel(snapshot.focusedProvider);
     else if (key.ctrl && input === "i") orchestrator.toggleInspector();
-    else if (key.ctrl && input === "b") {
-      if (snapshot.mode === "build") return;
+    else if (key.ctrl && input === "v") {
+      if (snapshot.mode !== "build") return;
+      setReviewCriteria("");
+      void orchestrator.prepareReview().then((ready) => { if (ready) setOverlay("review"); });
+    } else if (key.ctrl && input === "f") {
+      if (!snapshot.review) return;
+      setFindingIndex(0);
+      setStaleAcknowledged(false);
+      setOverlay("findings");
+      const first = snapshot.review.findings[0];
+      if (first) void orchestrator.selectFinding(first.id);
+    } else if (key.ctrl && input === "b") {
+      if (snapshot.mode !== "compare") return;
       setWriterProvider(snapshot.focusedProvider);
       setWriterConfirm(false);
       setOverlay("writer");
@@ -315,5 +437,5 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} />;
 }

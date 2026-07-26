@@ -12,12 +12,17 @@ import type {
   ProviderId,
   RoleId,
   RoleProfile,
+  ReviewMechanism,
+  ReviewSnapshot,
   SessionHandle,
   WriterLease,
 } from "../domain.ts";
 import { GitObserver } from "../git/observer.ts";
 import { appendBounded, sanitizeTerminalText } from "../terminal/sanitize.ts";
 import { isPathInsideWorkspace, WorkspaceGuard } from "../workspace/guard.ts";
+import { captureReviewPatch, createReviewEnvelope } from "../review/envelope.ts";
+import { buildFindingsRelay, buildReviewPrompt, parseReviewFindings } from "../review/findings.ts";
+import { loadFindingPreview } from "../review/preview.ts";
 
 // Visible M1 routing hypotheses only; this is not the approved v0.1 default profile.
 const M1_PREVIEW_ROLES: RoleProfile = {
@@ -53,6 +58,8 @@ export class CompareOrchestrator {
   #revokeAfterTurn: ProviderId | null = null;
   #gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   #promotionPending = false;
+  #reviewPending = false;
+  #lastWriterPrompt: string | null = null;
   #snapshot: AppSnapshot;
 
   constructor(
@@ -73,6 +80,7 @@ export class CompareOrchestrator {
       git: this.#git.snapshot,
       roles: { ...M1_PREVIEW_ROLES },
       approvals: [],
+      review: null,
       diagnostics: [],
       notice: null,
     };
@@ -174,6 +182,14 @@ export class CompareOrchestrator {
   }
 
   async promoteWriter(provider: ProviderId, dirtyTreeAcknowledged: boolean): Promise<boolean> {
+    if (this.#reviewPending) {
+      this.#patch({ notice: "Wait for the review handoff check to finish." });
+      return false;
+    }
+    if (this.#snapshot.mode !== "compare") {
+      this.#patch({ notice: "Writer promotion is available only from compare mode." });
+      return false;
+    }
     if (this.#snapshot.writer || this.#snapshot.writerLease || this.#promotionPending) {
       this.#patch({ notice: `A writer lease already belongs to ${this.#snapshot.writer}.` });
       return false;
@@ -204,6 +220,7 @@ export class CompareOrchestrator {
         git: this.#git.snapshot,
         notice: `${provider} is the only writer. Network access remains off; prompt target did not change.`,
       });
+      this.#lastWriterPrompt = null;
       return true;
     } catch (error) {
       this.#patch({ notice: `Writer promotion failed: ${sanitizeTerminalText((error as Error).message)}` });
@@ -214,6 +231,10 @@ export class CompareOrchestrator {
   }
 
   async revokeWriter(): Promise<void> {
+    if (this.#reviewPending) {
+      this.#patch({ notice: "Wait for the review handoff check to finish before revoking the writer." });
+      return;
+    }
     const writer = this.#snapshot.writer;
     if (!writer) return;
     const lane = this.#snapshot.lanes[writer];
@@ -239,8 +260,222 @@ export class CompareOrchestrator {
       writerLease: null,
       writerRevoking: false,
       git: this.#git.snapshot,
+      review: this.#snapshot.review?.status === "draft" ? null : this.#snapshot.review,
       notice: `${provider} writer lease revoked; compare mode restored.`,
     });
+  }
+
+  async prepareReview(): Promise<boolean> {
+    if (this.#reviewPending || this.#snapshot.mode !== "build" || !this.#snapshot.writer || !this.#snapshot.writerLease) {
+      this.#patch({ notice: "Review handoff requires an active build writer lease." });
+      return false;
+    }
+    const writer = this.#snapshot.writer;
+    const reviewer: ProviderId = writer === "claude" ? "codex" : "claude";
+    if (!canAccept(this.#snapshot.lanes[writer]) || !canAccept(this.#snapshot.lanes[reviewer])) {
+      this.#patch({ notice: "Review handoff requires both writer and reviewer lanes to be idle." });
+      return false;
+    }
+    if (this.#snapshot.approvals.length) {
+      this.#patch({ notice: "Resolve every pending approval before review handoff." });
+      return false;
+    }
+    if (!this.#lastWriterPrompt) {
+      this.#patch({ notice: "Review handoff requires a completed writer prompt as its objective." });
+      return false;
+    }
+    this.#reviewPending = true;
+    try {
+      const git = await this.#git.refresh();
+      this.#patch({ git });
+      if (git.error) throw new Error(git.error);
+      const baselineHead = this.#git.baselineHead;
+      if (!baselineHead) throw new Error("Review handoff lost its Git baseline revision.");
+      const patch = await captureReviewPatch(git.root, git.evidence, { baseRevision: baselineHead });
+      const mechanism = `${reviewer}_generic` as ReviewMechanism;
+      const envelope = createReviewEnvelope({
+        writer,
+        reviewer,
+        mechanism,
+        objective: this.#lastWriterPrompt,
+        acceptanceCriteria: "",
+        projectRoot: this.projectRoot,
+        baselineFingerprint: this.#snapshot.writerLease.baselineFingerprint,
+        patch,
+      });
+      this.#patch({
+        git: this.#git.snapshot,
+        review: {
+          status: "draft",
+          writer,
+          reviewer,
+          mechanism,
+          envelope,
+          findings: [],
+          activeFindingId: null,
+          preview: null,
+          stale: false,
+          parseError: null,
+        },
+        notice: `Review draft ready for ${reviewer}; writer lease remains active until confirmation.`,
+      });
+      return true;
+    } catch (error) {
+      this.#patch({ notice: `Review handoff refused: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    } finally {
+      this.#reviewPending = false;
+    }
+  }
+
+  async startReview(acceptanceCriteria: string): Promise<boolean> {
+    const review = this.#snapshot.review;
+    const lease = this.#snapshot.writerLease;
+    const criteria = sanitizeTerminalText(acceptanceCriteria).trim();
+    if (this.#reviewPending || !review || review.status !== "draft" || this.#snapshot.mode !== "build" || !lease || !criteria) {
+      this.#patch({ notice: criteria ? "Review draft is no longer valid." : "Acceptance criteria are required." });
+      return false;
+    }
+    if (!this.#workspace.validate(lease, review.writer) || this.#snapshot.writer !== review.writer) {
+      this.#patch({ notice: "Review handoff lost its matching writer lease." });
+      return false;
+    }
+    this.#reviewPending = true;
+    try {
+      const git = await this.#git.refresh();
+      const current = await captureReviewPatch(git.root, git.evidence, { baseRevision: review.envelope.head });
+      if (
+        this.#snapshot.mode !== "build" ||
+        this.#snapshot.review?.envelope.id !== review.envelope.id ||
+        this.#snapshot.writer !== review.writer ||
+        this.#snapshot.writerLease !== lease ||
+        !this.#workspace.validate(lease, review.writer)
+      ) {
+        throw new Error("Review handoff state changed while the diff was being verified.");
+      }
+      if (current.diffHash !== review.envelope.diffHash) {
+        const envelope = createReviewEnvelope({
+          writer: review.writer,
+          reviewer: review.reviewer,
+          mechanism: review.mechanism,
+          objective: review.envelope.objective,
+          acceptanceCriteria: "",
+          projectRoot: this.projectRoot,
+          baselineFingerprint: lease.baselineFingerprint,
+          patch: current,
+        });
+        this.#patch({ git, review: { ...review, envelope }, notice: "Diff changed while confirming review; inspect and confirm the refreshed hash." });
+        return false;
+      }
+      if (!this.#workspace.revoke(lease.id)) throw new Error("Writer lease revocation failed before review.");
+      const envelope = Object.freeze({ ...review.envelope, acceptanceCriteria: criteria });
+      const running: ReviewSnapshot = { ...review, status: "running", envelope, findings: [], activeFindingId: null, preview: null, stale: false, parseError: null };
+      this.#patchLane(review.reviewer, { output: "", error: null, toolSummary: "read-only review" });
+      this.#patch({
+        mode: "review",
+        writer: null,
+        writerLease: null,
+        writerRevoking: false,
+        review: running,
+        focusedProvider: review.reviewer,
+        notice: `${review.writer} paused; ${review.reviewer} review started read-only via ${review.mechanism}.`,
+      });
+      void this.#runReview(running);
+      return true;
+    } catch (error) {
+      this.#patch({ notice: `Review start failed: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    } finally {
+      this.#reviewPending = false;
+    }
+  }
+
+  async #runReview(review: ReviewSnapshot): Promise<void> {
+    const envelope: PromptEnvelope = Object.freeze({
+      envelopeId: review.envelope.id,
+      createdAt: review.envelope.createdAt,
+      prompt: buildReviewPrompt(review.envelope),
+    });
+    await this.#runLane(review.reviewer, envelope);
+    if (this.#snapshot.mode !== "review" || this.#snapshot.review?.envelope.id !== review.envelope.id) return;
+    let stale = true;
+    try {
+      const git = await this.#git.refresh();
+      const current = await captureReviewPatch(git.root, git.evidence, { baseRevision: review.envelope.head });
+      stale = current.diffHash !== review.envelope.diffHash;
+      this.#patch({ git });
+    } catch {}
+    const lane = this.#snapshot.lanes[review.reviewer];
+    const parsed = lane.status === "COMPLETED"
+      ? parseReviewFindings(lane.output, review.reviewer, review.mechanism, this.projectRoot)
+      : { findings: [], error: lane.error ?? `Review ended with ${lane.status}.` };
+    const status: ReviewSnapshot["status"] = lane.status === "COMPLETED"
+      ? "completed"
+      : lane.status === "CANCELLED"
+        ? "cancelled"
+        : "failed";
+    this.#patch({
+      review: { ...review, status, findings: parsed.findings, activeFindingId: parsed.findings[0]?.id ?? null, preview: null, stale, parseError: parsed.error },
+      notice: parsed.error
+        ? `Review finished without structured findings: ${parsed.error}`
+        : `Review completed with ${parsed.findings.length} finding(s)${stale ? " · STALE" : ""}.`,
+    });
+  }
+
+  toggleFinding(id: string): void {
+    const review = this.#snapshot.review;
+    if (!review) return;
+    this.#patch({
+      review: {
+        ...review,
+        findings: review.findings.map((finding) => finding.id === id ? { ...finding, selected: !finding.selected } : finding),
+      },
+    });
+  }
+
+  async selectFinding(id: string): Promise<void> {
+    const review = this.#snapshot.review;
+    const finding = review?.findings.find((item) => item.id === id);
+    if (!review || !finding) return;
+    this.#patch({ review: { ...review, activeFindingId: id, preview: null } });
+    const preview = await loadFindingPreview(this.projectRoot, finding);
+    if (this.#snapshot.review?.envelope.id !== review.envelope.id || this.#snapshot.review.activeFindingId !== id) return;
+    this.#patch({ review: { ...this.#snapshot.review, preview } });
+  }
+
+  finishReview(action: "accept" | "exit"): boolean {
+    const review = this.#snapshot.review;
+    if (!review || this.#snapshot.mode !== "review" || review.status === "running") return false;
+    this.#git.clearBaseline();
+    this.#patch({
+      mode: "compare",
+      review: { ...review, status: action === "accept" ? "accepted" : "exited" },
+      git: this.#git.snapshot,
+      notice: action === "accept" ? "Review accepted; no commit or writer lease was created." : "Review exited without action.",
+    });
+    return true;
+  }
+
+  returnSelectedFindings(staleAcknowledged: boolean): string | null {
+    const review = this.#snapshot.review;
+    if (!review || this.#snapshot.mode !== "review" || review.status !== "completed") return null;
+    if (review.stale && !staleAcknowledged) {
+      this.#patch({ notice: "Review is stale; acknowledge the changed workspace before returning findings." });
+      return null;
+    }
+    if (!review.findings.some((finding) => finding.selected)) {
+      this.#patch({ notice: "Select at least one finding to return." });
+      return null;
+    }
+    const relay = buildFindingsRelay(review.envelope, review.findings);
+    this.#git.clearBaseline();
+    this.#patch({
+      mode: "compare",
+      review: { ...review, status: "returned" },
+      git: this.#git.snapshot,
+      notice: `Selected findings prepared for ${review.writer}; writer promotion still requires confirmation.`,
+    });
+    return relay;
   }
 
   resolveApproval(id: string, decision: ApprovalDecision): boolean {
@@ -325,6 +560,14 @@ export class CompareOrchestrator {
       this.#patch({ notice: "Prompt is empty." });
       return false;
     }
+    if (this.#reviewPending) {
+      this.#patch({ notice: "Wait for the review handoff check to finish before dispatching." });
+      return false;
+    }
+    if (this.#snapshot.mode === "review") {
+      this.#patch({ notice: "Use review actions while review mode is active; ordinary dispatch is paused." });
+      return false;
+    }
     const selected: ProviderId[] =
       this.#snapshot.target === "both" ? ["claude", "codex"] : [this.#snapshot.target];
     const unavailable = selected.find((provider) => !canAccept(this.#snapshot.lanes[provider]));
@@ -342,6 +585,9 @@ export class CompareOrchestrator {
       createdAt: new Date().toISOString(),
       prompt: cleanPrompt,
     });
+    if (this.#snapshot.mode === "build" && this.#snapshot.writer && selected.includes(this.#snapshot.writer)) {
+      this.#lastWriterPrompt = cleanPrompt;
+    }
     for (const provider of selected) {
       this.#patchLane(provider, { status: "STARTING", error: null, toolSummary: null });
     }

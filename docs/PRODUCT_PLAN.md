@@ -933,10 +933,18 @@ test also passed. The disposable-repository live approval gate remains opt-in.
 
 ### M3 — Reviewer handoff
 
-The proposed safety and UX decisions for the first M3 slice are recorded in
-`docs/M3_REVIEW_HANDOFF_DECISIONS.md`. Implementation remains gated on approval
-of writer-lease revocation, the exact bounded diff envelope, and the explicit
-single-reviewer mechanism/fallback policy.
+The safety and UX decisions for the first M3 slice in
+`docs/M3_REVIEW_HANDOFF_DECISIONS.md` were approved on 2026-07-26: revoke the
+writer lease before review, use an exact 200 KiB-capped diff envelope with
+stale detection, and start with one explicit read-only reviewer mechanism.
+
+First-slice offline checkpoint: **passed on 2026-07-26**. Sixty-four
+credential-free tests cover lease revocation, read-only reviewer dispatch,
+permission denial, diff reconfirmation, stale findings, bounded tracked and
+untracked patches, symlink handling, structured finding validation, lossless
+relay, file/line preview, and narrow Korean rendering. Type checking and both
+Bun build modes pass. Native Codex `review/start`, two-lens review, and the
+scout/architect packet remain open M3 work.
 
 - Review envelope generated from task, criteria, base, and diff.
 - Scout/architect handoff packet with objective, constraints, relevant files, open questions, and acceptance criteria.

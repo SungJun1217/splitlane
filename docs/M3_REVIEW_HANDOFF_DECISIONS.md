@@ -1,6 +1,6 @@
 # M3 Reviewer Handoff Decisions
 
-Status: proposed on 2026-07-26; implementation awaits user approval
+Status: approved for implementation on 2026-07-26
 
 Last updated: 2026-07-26
 
@@ -129,9 +129,9 @@ captures a new Git baseline and requires a new writer lease.
 - No automated test starts a real model turn. A disposable-repository live
   review remains separately opt-in.
 
-## Decisions requested
+## Approval record
 
-Approval is requested for these three material choices together:
+The user approved these three material choices together on 2026-07-26:
 
 1. Review confirmation revokes the writer lease first; the original writer is
    paused metadata only, and every reviewer mechanism is read-only.
@@ -141,3 +141,19 @@ Approval is requested for these three material choices together:
    user-confirmed findings relay. Native Codex review is capability-gated,
    generic fallback is explicit, and two-lens/scout handoffs remain later M3
    increments.
+
+## Implementation checkpoint
+
+The first offline M3 slice passed on 2026-07-26. The implementation freezes
+tracked and untracked changes into a SHA-256-addressed packet, refuses packets
+over 200 KiB, revokes the writer lease before review dispatch, denies reviewer
+permission requests, validates bounded structured findings, detects workspace
+drift, previews valid file/line locations read-only, and returns only selected
+findings through a user-controlled relay.
+
+Sixty-four credential-free tests, type checking, bundle compilation, and
+standalone compilation pass without a provider model turn. Codex native
+`review/start` remains unavailable in the UI until its structured event and
+cancellation contract is covered by a version-matched fake app-server fixture.
+Two-lens and scout/architect handoffs remain later M3 increments, so the overall
+M3 milestone is not yet marked complete.

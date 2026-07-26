@@ -19,6 +19,7 @@ const EMPTY: GitSnapshot = {
 
 interface Baseline {
   fingerprint: string;
+  head: string;
   preExisting: ReadonlySet<string>;
   hashes: ReadonlyMap<string, string>;
 }
@@ -26,7 +27,7 @@ interface Baseline {
 async function git(root: string, args: readonly string[], maxOutput = 200_000) {
   return runCommand(
     "git",
-    ["-c", "core.pager=cat", "-c", "pager.diff=false", "--no-pager", ...args],
+    ["-c", "core.pager=cat", "-c", "pager.diff=false", "-c", "core.quotePath=false", "--no-pager", ...args],
     {
       cwd: root,
       timeoutMs: 5_000,
@@ -94,6 +95,10 @@ export class GitObserver {
     return this.#snapshot;
   }
 
+  get baselineHead(): string | null {
+    return this.#baseline?.head ?? null;
+  }
+
   async captureBaseline(): Promise<string> {
     const snapshot = await this.refresh();
     if (snapshot.error) throw new Error(snapshot.error);
@@ -115,7 +120,7 @@ export class GitObserver {
       status: [...preExisting].sort(),
       hashes: [...hashes.entries()],
     };
-    this.#baseline = { fingerprint: fingerprint(value), preExisting, hashes };
+    this.#baseline = { fingerprint: fingerprint(value), head: value.head, preExisting, hashes };
     this.#writerHints.clear();
     await this.refresh();
     return this.#baseline.fingerprint;

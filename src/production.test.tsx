@@ -29,8 +29,11 @@ import { SplitlaneView } from "./ui/app.tsx";
 import { selectLayout } from "./ui/layout.ts";
 import { removeLastGrapheme } from "./ui/text.ts";
 import { WorkspaceGuard, isPathInsideWorkspace } from "./workspace/guard.ts";
+import { captureReviewPatch, createReviewEnvelope, REVIEW_PATCH_LIMIT } from "./review/envelope.ts";
+import { FINDINGS_END, FINDINGS_START, parseReviewFindings } from "./review/findings.ts";
+import { loadFindingPreview } from "./review/preview.ts";
 
-type Scenario = "complete" | "fail" | "hold" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval";
+type Scenario = "complete" | "fail" | "hold" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
 
 class FakeAdapter implements ProviderAdapter {
   readonly sessions: SessionOptions[] = [];
@@ -64,17 +67,36 @@ class FakeAdapter implements ProviderAdapter {
     this.#active.set(id, queue);
     queueMicrotask(() => {
       queue.push(event(this.provider, "turn.started", { sessionId: session.id, turnId: id }));
+      const reviewOutput = [
+        FINDINGS_START,
+        JSON.stringify({ findings: [{
+          id: "finding-1",
+          severity: "high",
+          title: "Regression risk",
+          body: "The changed branch lacks a guard.",
+          file: "existing.txt",
+          lineStart: 1,
+          lineEnd: 1,
+          verification: "Run the focused test.",
+        }] }),
+        FINDINGS_END,
+      ].join("\n");
       queue.push(event(this.provider, "message.delta", {
         sessionId: session.id,
         turnId: id,
-        payload: { text: `${this.provider}:한글` },
+        payload: { text: ["review_findings", "review_delayed"].includes(this.scenario) ? reviewOutput : `${this.provider}:한글` },
       }));
       if (this.scenario === "fail") {
         queue.push(event(this.provider, "turn.failed", { sessionId: session.id, turnId: id, payload: { error: "fake failure" } }));
         queue.close();
-      } else if (this.scenario === "complete") {
+      } else if (this.scenario === "complete" || this.scenario === "review_findings") {
         queue.push(event(this.provider, "turn.completed", { sessionId: session.id, turnId: id }));
         queue.close();
+      } else if (this.scenario === "review_delayed") {
+        setTimeout(() => {
+          queue.push(event(this.provider, "turn.completed", { sessionId: session.id, turnId: id }));
+          queue.close();
+        }, 80);
       } else if (["approval", "double_approval", "network_approval", "outside_approval", "unknown_file_approval"].includes(this.scenario)) {
         const count = this.scenario === "double_approval" ? 2 : 1;
         const requests = Array.from({ length: count }, (_, index) => {
@@ -432,6 +454,75 @@ describe("terminal rendering", () => {
     expect(approval).toContain("APPROVAL INBOX · 1 PENDING");
     expect(approval).toContain("A allow once · D deny · X cancel turn");
   });
+
+  test("renders review confirmation and stale Korean findings in a narrow terminal", () => {
+    const { orchestrator } = setup();
+    const base = orchestrator.getSnapshot();
+    const envelope = createReviewEnvelope({
+      writer: "claude",
+      reviewer: "codex",
+      mechanism: "codex_generic",
+      objective: "한글 경계를 유지해줘",
+      acceptanceCriteria: "",
+      projectRoot: process.cwd(),
+      baselineFingerprint: "baseline",
+      patch: {
+        branch: "main",
+        head: "1234567890abcdef",
+        files: [{ path: "한글.ts", classification: "writer-hinted" }],
+        diff: "diff --git a/한글.ts b/한글.ts",
+        diffBytes: 36,
+        diffHash: "a".repeat(64),
+      },
+    });
+    const reviewSnapshot: AppSnapshot = {
+      ...base,
+      mode: "review",
+      review: {
+        status: "completed",
+        writer: "claude",
+        reviewer: "codex",
+        mechanism: "codex_generic",
+        envelope: { ...envelope, acceptanceCriteria: "회귀 없음" },
+        stale: true,
+        parseError: null,
+        findings: [{
+          id: "finding-ko",
+          provider: "codex",
+          mechanism: "codex_generic",
+          severity: "high",
+          title: "한글 경계 오류",
+          body: "너비 계산을 확인하세요.",
+          file: "한글.ts",
+          lineStart: 3,
+          lineEnd: 3,
+          verification: "좁은 터미널 테스트",
+          selected: true,
+        }],
+        activeFindingId: "finding-ko",
+        preview: {
+          file: "한글.ts",
+          lineStart: 3,
+          lineEnd: 3,
+          content: "    3 │ 너비 계산",
+          error: null,
+        },
+      },
+    };
+    const confirmation = renderToString(
+      <SplitlaneView snapshot={{ ...reviewSnapshot, mode: "build" }} prompt="" columns={90} rows={30} overlay="review" reviewCriteria="회귀 없음" />,
+      { columns: 90 },
+    );
+    expect(confirmation).toContain("REVOKE WRITER THEN READ ONLY");
+    expect(confirmation).toContain("회귀 없음");
+    const findings = renderToString(
+      <SplitlaneView snapshot={reviewSnapshot} prompt="" columns={90} rows={30} overlay="findings" staleAcknowledged />,
+      { columns: 90 },
+    );
+    expect(findings).toContain("STALE");
+    expect(findings).toContain("한글 경계 오류");
+    expect(findings).toContain("paused CLAUDE");
+  });
 });
 
 describe("M2 workspace guard", () => {
@@ -526,6 +617,214 @@ describe("M2 workspace guard", () => {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("M3 reviewer handoff", () => {
+  async function reviewRepository(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-m3-review-"));
+    await gitCommand(root, "init", "-q");
+    await gitCommand(root, "config", "user.email", "test@example.invalid");
+    await gitCommand(root, "config", "user.name", "Splitlane Test");
+    await Bun.write(join(root, "existing.txt"), "baseline\n");
+    await gitCommand(root, "add", "existing.txt");
+    await gitCommand(root, "commit", "-qm", "baseline");
+    return root;
+  }
+
+  test("review confirmation revokes the writer and runs only the peer read-only", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "review_findings");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      expect(await orchestrator.promoteWriter("claude", false)).toBe(true);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Implement the guarded change");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "changed\n");
+
+      expect(await orchestrator.prepareReview()).toBe(true);
+      const draft = orchestrator.getSnapshot().review;
+      expect(draft).toMatchObject({ status: "draft", writer: "claude", reviewer: "codex", mechanism: "codex_generic" });
+      expect(orchestrator.getSnapshot().writer).toBe("claude");
+      const starts = await Promise.all([
+        orchestrator.startReview("The guard is tested and preserves existing behavior."),
+        orchestrator.startReview("A concurrent handoff must lose."),
+      ]);
+      expect(starts).toEqual([true, false]);
+      expect(orchestrator.getSnapshot().mode).toBe("review");
+      expect(orchestrator.getSnapshot().writer).toBeNull();
+      expect(orchestrator.getSnapshot().writerLease).toBeNull();
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "completed");
+      expect(codex.turnOptions.at(-1)?.workspaceAccess).toBe("read_only");
+      expect(codex.turnOptions.at(-1)?.writerLease).toBeNull();
+      expect(codex.prompts.at(-1)).toContain("Implement the guarded change");
+      expect(orchestrator.getSnapshot().review?.findings[0]).toMatchObject({
+        id: "finding-1",
+        provider: "codex",
+        file: "existing.txt",
+        lineStart: 1,
+        selected: false,
+      });
+      await orchestrator.selectFinding("finding-1");
+      expect(orchestrator.getSnapshot().review?.preview).toMatchObject({ file: "existing.txt", lineStart: 1, error: null });
+      expect(orchestrator.getSnapshot().review?.preview?.content).toContain("changed");
+      orchestrator.toggleFinding("finding-1");
+      const relay = orchestrator.returnSelectedFindings(false);
+      expect(relay).toContain("source: codex via codex_generic");
+      expect(relay).toContain("The changed branch lacks a guard.");
+      expect(orchestrator.getSnapshot().mode).toBe("compare");
+      expect(orchestrator.getSnapshot().review?.status).toBe("returned");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a changed diff must be reconfirmed before the writer lease is revoked", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "review_findings");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Change the file");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "first\n");
+      await orchestrator.prepareReview();
+      const firstHash = orchestrator.getSnapshot().review?.envelope.diffHash;
+      await Bun.write(join(root, "existing.txt"), "second\n");
+      expect(await orchestrator.startReview("Match the criteria")).toBe(false);
+      expect(orchestrator.getSnapshot().mode).toBe("build");
+      expect(orchestrator.getSnapshot().writer).toBe("claude");
+      expect(orchestrator.getSnapshot().writerLease).not.toBeNull();
+      expect(orchestrator.getSnapshot().review?.envelope.diffHash).not.toBe(firstHash);
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("review includes changes committed after writer promotion", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "review_findings");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Commit the implementation");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "committed by writer\n");
+      await gitCommand(root, "add", "existing.txt");
+      await gitCommand(root, "commit", "-qm", "writer change");
+      await orchestrator.refreshGit();
+      expect(orchestrator.getSnapshot().git.dirty).toBe(false);
+      expect(await orchestrator.prepareReview()).toBe(true);
+      expect(orchestrator.getSnapshot().review?.envelope.diff).toContain("committed by writer");
+      expect(orchestrator.getSnapshot().review?.envelope.files).toContainEqual({
+        path: "existing.txt",
+        classification: "unknown/external",
+      });
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("external workspace drift marks completed findings stale", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "review_delayed");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Change the file");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "review basis\n");
+      await orchestrator.prepareReview();
+      await orchestrator.startReview("No regressions");
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "running");
+      await Bun.write(join(root, "existing.txt"), "external drift\n");
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "completed");
+      expect(orchestrator.getSnapshot().review?.stale).toBe(true);
+      orchestrator.toggleFinding("finding-1");
+      expect(orchestrator.returnSelectedFindings(false)).toBeNull();
+      expect(orchestrator.returnSelectedFindings(true)).toContain("finding-1");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("reviewer permission requests fail closed without entering the inbox", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "approval");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Change the file");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "changed\n");
+      await orchestrator.prepareReview();
+      await orchestrator.startReview("No writes during review");
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "completed");
+      expect(codex.approvalDecisions).toEqual(["deny"]);
+      expect(orchestrator.getSnapshot().approvals).toHaveLength(0);
+      expect(orchestrator.getSnapshot().diagnostics.join("\n")).toContain("read-only lane was denied");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("review patch captures symlinks as metadata and refuses oversized packets", async () => {
+    const root = await reviewRepository();
+    const outside = await mkdtemp(join(tmpdir(), "splitlane-m3-outside-"));
+    try {
+      await Bun.write(join(outside, "secret.txt"), "must not be followed\n");
+      await symlink(join(outside, "secret.txt"), join(root, "linked.txt"));
+      const patch = await captureReviewPatch(root, []);
+      expect(patch.diff).toContain("<symlink:");
+      expect(patch.diff).not.toContain("must not be followed");
+      const preview = await loadFindingPreview(root, {
+        id: "linked",
+        provider: "codex",
+        mechanism: "codex_generic",
+        severity: "high",
+        title: "linked",
+        body: "linked",
+        file: "linked.txt",
+        lineStart: 1,
+        lineEnd: 1,
+        verification: null,
+        selected: false,
+      });
+      expect(preview?.error).toContain("outside");
+      expect(preview?.content).toBe("");
+      await Bun.write(join(root, "large.txt"), "x".repeat(REVIEW_PATCH_LIMIT + 1));
+      await expect(captureReviewPatch(root, [])).rejects.toThrow(/exceeds|Unable to capture/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("structured findings reject duplicate IDs and outside-root paths", () => {
+    const duplicate = `${FINDINGS_START}{"findings":[{"id":"same","severity":"high","title":"a","body":"a"},{"id":"same","severity":"low","title":"b","body":"b"}]}${FINDINGS_END}`;
+    expect(parseReviewFindings(duplicate, "codex", "codex_generic", process.cwd()).error).toContain("unique");
+    const outside = `${FINDINGS_START}{"findings":[{"id":"outside","severity":"high","title":"a","body":"a","file":"../secret"}]}${FINDINGS_END}`;
+    expect(parseReviewFindings(outside, "codex", "codex_generic", process.cwd()).error).toContain("outside");
   });
 });
 

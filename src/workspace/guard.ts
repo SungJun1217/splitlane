@@ -21,7 +21,7 @@ function within(root: string, candidate: string): boolean {
 export function isPathInsideWorkspace(projectRoot: string, requestedPath: string): boolean {
   const root = canonicalPath(projectRoot);
   const lexical = resolve(projectRoot, requestedPath);
-  if (!within(resolve(projectRoot), lexical)) return false;
+  if (!within(resolve(projectRoot), lexical) && !within(root, lexical)) return false;
 
   let existing = lexical;
   while (!existsSync(existing)) {

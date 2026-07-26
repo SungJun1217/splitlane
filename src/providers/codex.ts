@@ -165,7 +165,7 @@ export class CodexAdapter implements ProviderAdapter {
       clientInfo: {
         name: "splitlane",
         title: "Splitlane",
-        version: "0.1.0-m2",
+        version: "0.1.0-m3",
       },
       capabilities: { experimentalApi: false },
     });

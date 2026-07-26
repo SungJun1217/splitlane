@@ -1,6 +1,6 @@
 export type ProviderId = "claude" | "codex";
 export type PromptTarget = "both" | ProviderId;
-export type WorkflowMode = "compare" | "build";
+export type WorkflowMode = "compare" | "build" | "review";
 export type CapabilityStability = "stable" | "preview" | "experimental";
 export type WorkspaceAccess = "read_only" | "workspace_write";
 export type ApprovalDecision = "allow_once" | "deny" | "cancel_turn";
@@ -155,6 +155,65 @@ export interface GitFileEvidence {
   classification: GitChangeClassification;
 }
 
+export type ReviewMechanism = "claude_generic" | "codex_generic" | "codex_native";
+export type ReviewSeverity = "blocker" | "high" | "medium" | "low" | "info";
+export type ReviewStatus = "draft" | "running" | "completed" | "failed" | "cancelled" | "accepted" | "exited" | "returned";
+
+export interface ReviewEnvelope {
+  schemaVersion: "review-envelope/v1";
+  id: string;
+  createdAt: string;
+  writer: ProviderId;
+  reviewer: ProviderId;
+  mechanism: ReviewMechanism;
+  objective: string;
+  acceptanceCriteria: string;
+  projectRoot: string;
+  branch: string;
+  head: string;
+  baselineFingerprint: string;
+  files: readonly GitFileEvidence[];
+  diff: string;
+  diffBytes: number;
+  diffHash: string;
+  truncated: false;
+}
+
+export interface ReviewFinding {
+  id: string;
+  provider: ProviderId;
+  mechanism: ReviewMechanism;
+  severity: ReviewSeverity;
+  title: string;
+  body: string;
+  file: string | null;
+  lineStart: number | null;
+  lineEnd: number | null;
+  verification: string | null;
+  selected: boolean;
+}
+
+export interface ReviewFilePreview {
+  file: string;
+  lineStart: number | null;
+  lineEnd: number | null;
+  content: string;
+  error: string | null;
+}
+
+export interface ReviewSnapshot {
+  status: ReviewStatus;
+  writer: ProviderId;
+  reviewer: ProviderId;
+  mechanism: ReviewMechanism;
+  envelope: ReviewEnvelope;
+  findings: readonly ReviewFinding[];
+  activeFindingId: string | null;
+  preview: ReviewFilePreview | null;
+  stale: boolean;
+  parseError: string | null;
+}
+
 export type RoleId =
   | "scout"
   | "architect"
@@ -177,6 +236,7 @@ export interface AppSnapshot {
   git: GitSnapshot;
   roles: RoleProfile;
   approvals: readonly PendingApproval[];
+  review: ReviewSnapshot | null;
   diagnostics: readonly string[];
   notice: string | null;
 }

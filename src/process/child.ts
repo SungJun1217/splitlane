@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { setTimeout as delay } from "node:timers/promises";
 import { sanitizeTerminalText } from "../terminal/sanitize.ts";
 
@@ -8,6 +9,7 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  truncated: boolean;
 }
 
 export function runCommand(
@@ -21,21 +23,33 @@ export function runCommand(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let truncated = false;
     let settled = false;
+    let decodersEnded = false;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     const child = spawn(command, [...args], {
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const retain = (current: string, chunk: Buffer): string =>
-      (current + sanitizeTerminalText(chunk.toString("utf8"))).slice(-maxOutput);
-    child.stdout.on("data", (chunk: Buffer) => (stdout = retain(stdout, chunk)));
-    child.stderr.on("data", (chunk: Buffer) => (stderr = retain(stderr, chunk)));
+    const retain = (current: string, value: string): string => {
+      const next = current + sanitizeTerminalText(value);
+      if (next.length > maxOutput) truncated = true;
+      return next.slice(-maxOutput);
+    };
+    child.stdout.on("data", (chunk: Buffer) => (stdout = retain(stdout, stdoutDecoder.write(chunk))));
+    child.stderr.on("data", (chunk: Buffer) => (stderr = retain(stderr, stderrDecoder.write(chunk))));
     const finish = (result: Pick<CommandResult, "available" | "exitCode">) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ...result, stdout, stderr, timedOut });
+      if (!decodersEnded) {
+        decodersEnded = true;
+        stdout = retain(stdout, stdoutDecoder.end());
+        stderr = retain(stderr, stderrDecoder.end());
+      }
+      resolve({ ...result, stdout, stderr, timedOut, truncated });
     };
     child.once("error", () => finish({ available: false, exitCode: null }));
     child.once("close", (code) => finish({ available: true, exitCode: code }));
