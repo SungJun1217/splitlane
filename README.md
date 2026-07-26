@@ -100,6 +100,10 @@ grant, then a completed build opens a separate Claude challenge confirmation.
 Use `Option/Alt+D` for direct prompts; `Ctrl+R` then selects Codex, Claude, or
 the explicit `BROADCAST` route.
 
+On normal and ultra-wide terminals, Claude remains above Codex in the left
+workspace and the read-only code/evidence inspector stays on the right. Lane
+focus shortcuts never change the prompt route.
+
 > [!NOTE]
 > Starting the TUI probes locally installed CLIs but does not start a model
 > turn. Sending a prompt does.
@@ -146,7 +150,7 @@ Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
 |---|---|
 | Composer | `Enter` run/send · `Option/Alt+D` task flow/direct |
 | Prompt routing | Direct mode: `Ctrl+R` cycle `CODEX/CLAUDE/BROADCAST` |
-| View | `Option/Alt+0` both/focused · `Alt+1` Claude · `Alt+2` Codex |
+| View | `Option/Alt+0` both/focused · `Alt+1` focus Claude · `Alt+2` focus Codex |
 | Output | `PgUp/PgDn` scroll · `Home` oldest · `End` follow tail |
 | Workflow | `Ctrl+B` promote writer · `Ctrl+W` revoke · `Ctrl+V` review |
 | Evidence | `Option/Alt+I` inspector · `Ctrl+T` activity · `Ctrl+F` findings |

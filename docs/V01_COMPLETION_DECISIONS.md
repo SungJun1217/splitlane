@@ -52,12 +52,19 @@ therefore separates these concepts:
   inspector to their right when width permits. A narrow terminal keeps both
   lanes stacked and temporarily hides the inspector rather than hiding a lane.
 - `Option/Alt+0` explicitly switches between both-lane and focused-lane views.
-  `Option/Alt+1` and `Option/Alt+2` focus a lane and select it as the send route.
+  `Option/Alt+1` and `Option/Alt+2` only focus a lane. They never change the
+  composer mode or send route.
 - The default send route is Codex, matching the initial builder focus. The route is
   always printed as `send CLAUDE`, `send CODEX`, or `send BROADCAST` in both the
   header and composer. Only the explicit `BROADCAST` route starts both harnesses.
 - `Ctrl+R` cycles send routes independently of view. Broadcast remains atomic
   and retains every existing queue, session, and workspace safety rule.
+
+The lane hierarchy is invariant at wide and ultra-wide sizes: Claude stays
+above Codex on the left and the evidence inspector stays on the right. Extra
+width must not turn the three regions into equal peer columns. The status line
+must describe the active composer mode; direct mode cannot be labeled as an
+active guided flow.
 
 The default composer mode is the human-gated `TASK FLOW`. Enter first opens a
 two-step confirmation that grants Codex the existing single-writer lease and
@@ -446,3 +453,16 @@ or authorize paid live model turns.
   shutdown without starting a provider model turn. The complete offline suite
   passes 106 tests, including guided single-writer routing and responsive CJK
   rendering checks.
+
+### 2026-07-27 — Ultra-wide hierarchy correction
+
+- A user-captured ultra-wide terminal exposed an incorrect three-peer-column
+  breakpoint. Removed that breakpoint: Claude now remains above Codex in the
+  left workspace and the evidence inspector remains on the right at every
+  inspector-capable width.
+- Lane focus and direct routing are fully separated. `Option/Alt+1` and
+  `Option/Alt+2` only move visual focus; they cannot switch to direct mode or
+  retarget a prompt. `Ctrl+R` remains the explicit direct-route control.
+- Flow and direct status copy now reflects the active composer mode. A 240×60
+  PTY check verified stable hierarchy, focus-only `Option/Alt+1`, direct Codex
+  routing after the focus change, and clean shutdown without a model turn.

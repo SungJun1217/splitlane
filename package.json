@@ -1,6 +1,6 @@
 {
   "name": "splitlane",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "type": "module",
   "description": "A local TUI for operating Claude Code and Codex in separate lanes",

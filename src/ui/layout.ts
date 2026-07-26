@@ -1,10 +1,9 @@
-export type LayoutMode = "focused" | "stacked" | "columns";
+export type LayoutMode = "focused" | "split";
 export type ViewMode = "both" | "focused";
 
 export function selectLayout(columns: number, viewMode: ViewMode = "both"): LayoutMode {
   if (viewMode === "focused") return "focused";
-  if (columns < 180) return "stacked";
-  return "columns";
+  return "split";
 }
 
 export function headerHeight(columns: number): number {
@@ -32,10 +31,7 @@ export function panelHeights(
     const inspector = Math.max(6, Math.floor(usable * 0.35));
     return { content, lane: usable - inspector, inspector, showInspector };
   }
-  if (layout === "stacked") {
-    return { content, lane: Math.floor((content - 1) / 2), inspector: content, showInspector };
-  }
-  return { content, lane: content, inspector: content, showInspector };
+  return { content, lane: Math.floor((content - 1) / 2), inspector: content, showInspector };
 }
 
 export function panelWidths(

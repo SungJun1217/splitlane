@@ -454,8 +454,10 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
   const heights = panelHeights(columns, rows, snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode);
   const widths = panelWidths(columns, heights.showInspector, viewMode);
   const lanes = layout === "focused" ? [snapshot.focusedProvider] : (["claude", "codex"] as const);
-  const laneDirection = layout === "columns" ? "row" : "column";
   const outerDirection = layout === "focused" ? "column" : "row";
+  const layoutLabel = viewMode === "both"
+    ? heights.showInspector ? "DUAL + EVIDENCE" : "DUAL"
+    : heights.showInspector ? "FOCUS + EVIDENCE" : "FOCUS";
   const roleSummary = ["S", "A", "B", "D", "IR", "CR"].map((label, index) => `${label}:${snapshot.roles[ROLE_IDS[index] ?? "scout"] === "claude" ? "C" : "X"}`).join(" ");
   const focusedLabel = snapshot.focusedProvider === "claude" ? "C" : "X";
   const sendLabel = snapshot.target === "both" ? "BROADCAST" : snapshot.target.toUpperCase();
@@ -471,18 +473,18 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
         <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · FOCUS {focusedLabel}</Text> · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
         <Text><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " REVOKING" : ""}</Text>{pausedWriter} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals {snapshot.approvals.length} · queue {snapshot.queue.length}</Text>
         <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · memory {snapshot.metaSession.retainedBytes} B</Text>
-        <Text dimColor>flow CODEX → CLAUDE · roles {roleSummary} · manual</Text>
+        <Text dimColor>{composerMode === "flow" ? "flow CODEX → CLAUDE · manual" : `direct ${sendLabel} · ^R route · ⌥D flow`} · roles {roleSummary}</Text>
       </> : <>
         <Box justifyContent="space-between" flexDirection="row">
-          <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · {layout.toUpperCase()}</Text></Text>
+          <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · {layoutLabel}</Text></Text>
           <Text><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text></Text>
         </Box>
         <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · memory {snapshot.metaSession.retainedBytes} B · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
-        <Text dimColor>flow CODEX BUILD → CLAUDE CHALLENGE · manual gates · roles {roleSummary} · ^O edit</Text>
+        <Text dimColor>{composerMode === "flow" ? "flow CODEX BUILD → CLAUDE CHALLENGE · manual gates" : `direct route ${sendLabel} · ^R change · ⌥D task flow`} · roles {roleSummary} · ^O edit</Text>
       </>}
       {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} taskPrompt={prompt} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
         <Box flexDirection={outerDirection} gap={1} height={heights.content}>
-          <Box flexDirection={laneDirection} width={layout === "focused" ? undefined : widths.lanes} flexGrow={heights.showInspector ? 2 : 1} gap={1}>
+          <Box flexDirection="column" width={layout === "focused" ? undefined : widths.lanes} flexGrow={heights.showInspector ? 2 : 1} gap={1}>
             {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={heights.lane} scrollOffset={scrollOffsets[provider]} compact={compactBoth} />)}
           </Box>
           {heights.showInspector ? <Inspector snapshot={snapshot} height={heights.inspector} width={layout === "focused" ? undefined : widths.inspector} /> : null}
@@ -827,14 +829,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
     else if (key.meta && input === "0") setViewMode((current) => current === "both" ? "focused" : "both");
     else if (key.meta && input === "1") {
-      setComposerMode("direct");
       orchestrator.focus("claude");
-      orchestrator.setTarget("claude");
     }
     else if (key.meta && input === "2") {
-      setComposerMode("direct");
       orchestrator.focus("codex");
-      orchestrator.setTarget("codex");
     }
     else if (key.ctrl && input === "r") {
       setComposerMode("direct");

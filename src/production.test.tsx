@@ -235,6 +235,9 @@ describe("production orchestrator", () => {
     const { orchestrator } = setup();
     expect(orchestrator.getSnapshot().focusedProvider).toBe("codex");
     expect(orchestrator.getSnapshot().target).toBe("codex");
+    orchestrator.focus("claude");
+    expect(orchestrator.getSnapshot().focusedProvider).toBe("claude");
+    expect(orchestrator.getSnapshot().target).toBe("codex");
     orchestrator.cycleTarget();
     expect(orchestrator.getSnapshot().target).toBe("claude");
     orchestrator.cycleTarget();
@@ -896,10 +899,11 @@ describe("terminal rendering", () => {
   });
 
   test("selects responsive layouts and handles graphemes", () => {
-    expect(selectLayout(99)).toBe("stacked");
+    expect(selectLayout(99)).toBe("split");
     expect(selectLayout(99, "focused")).toBe("focused");
-    expect(selectLayout(100)).toBe("stacked");
-    expect(selectLayout(180)).toBe("columns");
+    expect(selectLayout(100)).toBe("split");
+    expect(selectLayout(180)).toBe("split");
+    expect(selectLayout(260)).toBe("split");
     expect(headerHeight(80)).toBe(4);
     expect(headerHeight(140)).toBe(3);
     expect(contentHeight(24, 80)).toBe(16);
@@ -969,6 +973,21 @@ describe("terminal rendering", () => {
     );
     expect(directOutput).toContain("send CODEX");
     expect(directOutput).toContain("CODEX 직접 질문");
+    expect(directOutput).toContain("direct CODEX");
+    expect(directOutput).not.toContain("flow CODEX → CLAUDE");
+
+    const ultraWideOutput = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={240} rows={60} />,
+      { columns: 240 },
+    );
+    const ultraWideLines = ultraWideOutput.split("\n");
+    const claudeHeaderIndex = ultraWideLines.findIndex((line) => line.includes("○ CLAUDE") && line.includes("CODE · EVIDENCE"));
+    const codexHeaderIndex = ultraWideLines.findIndex((line) => line.includes("● CODEX"));
+    expect(ultraWideOutput).toContain("VIEW BOTH · DUAL + EVIDENCE");
+    expect(ultraWideOutput).not.toContain("COLUMNS");
+    expect(claudeHeaderIndex).toBeGreaterThan(0);
+    expect(codexHeaderIndex).toBeGreaterThan(claudeHeaderIndex);
+    expect(ultraWideLines[claudeHeaderIndex]).not.toContain("CODEX");
 
     const noticeOutput = renderToString(
       <SplitlaneView snapshot={{ ...snapshot, notice: "Role handoff requires completed output." }} prompt="" columns={80} rows={24} />,

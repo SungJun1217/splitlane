@@ -218,21 +218,24 @@ The TUI has two conceptual regions:
 
 The terminal workspace always has visual and keyboard priority. The inspector is read-only in v0.1 and can be hidden instantly.
 
-### 6.2 Very wide terminal (180+ columns)
+### 6.2 Wide terminal (180+ columns)
 
 ```text
 ┌ project / branch ─ COMPARE ─ writer: none ─ approvals: 0 ───────────────────────────┐
-├ Claude ─ model ─ READY ┬ Codex ─ model ─ READY ┬ CHANGES / DIFF / FILE / FINDINGS ─┤
-│                        │                       │ M src/adapter.ts                    │
-│ terminal stream        │ terminal stream       │ @@ -12,7 +12,9 @@                  │
-│                        │                       │ - previous                         │
-│                        │                       │ + current                          │
-├────────────────────────┴───────────────────────┤                                    │
-│ target: BOTH  prompt…                          │                                    │
+├ Claude ─ model ─ READY ────────────────────────┬ CHANGES / DIFF / FILE / FINDINGS ─┤
+│ terminal stream using the full lane width      │ M src/adapter.ts                    │
+├ Codex ─ model ─ READY ─────────────────────────┤ @@ -12,7 +12,9 @@                  │
+│ terminal stream using the full lane width      │ - previous                         │
+│                                                │ + current                          │
+├────────────────────────────────────────────────┤                                    │
+│ prompt…                                        │                                    │
 └ Enter send · Alt+1/2 lane · Alt+I inspector ─┴─────────────────────────────────────┘
 ```
 
-Suggested width allocation: terminal workspace 68–72%, inspector 28–32%. Three columns are used only when both agent lanes remain above their minimum readable width.
+The lane order and hierarchy do not change at ultra-wide widths: Claude remains
+above Codex in the left terminal workspace and evidence remains on the right.
+Extra width improves line length instead of promoting all three regions to peer
+columns. Suggested allocation is approximately 66% lanes and 34% inspector.
 
 ### 6.3 Normal terminal (100–179 columns)
 
@@ -255,13 +258,14 @@ The view control has two states:
 - `Both`: Claude and Codex are stacked vertically.
 - `Focus`: one selected lane takes the full terminal height.
 
-At very large widths, `Both` may automatically become side-by-side lanes. The inspector remains on the right in either state.
+`Both` never becomes side-by-side lanes automatically. Viewing a lane and
+choosing a direct send route are independent actions.
 
 ### 6.4 Narrow terminal (under 100 columns)
 
-- Show one focused lane at a time.
-- Keep the unfocused lane's state badge visible in a tab bar.
-- Make the evidence inspector a full-screen tab or overlay.
+- Keep both lanes stacked by default and hide the evidence inspector.
+- `Focus` may show one selected lane with the inspector when height permits.
+- Keep the unfocused lane's state badge visible in the header.
 - Never compress away workflow mode, writer, pending approval count, effective model, or dirty-state indicator.
 
 ### 6.5 Evidence inspector
