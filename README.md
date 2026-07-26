@@ -110,6 +110,19 @@ runtime probe fails, only the generic mechanism is shown; Splitlane never starts
 a model turn while probing and never silently substitutes one mechanism after
 confirmation.
 
+The review confirmation also offers `T` for two-lens review. This revokes the
+writer lease once, freezes the same objective, criteria, Git base, diff, and
+diff hash, then starts Claude and Codex independently in read-only mode. `Tab`
+switches the visible lens. Findings, failures, and cancellation remain attributed
+to their provider and are never merged, deduplicated, scored, or declared an
+agreement.
+
+`Ctrl+H` prepares an explicit scout → architect → builder handoff from completed
+focused-lane output and the shared editor objective. The preview shows its
+constraints, relevant files, questions, acceptance criteria, source session,
+and Git fingerprint. Confirming only places the bounded packet into the shared
+prompt editor; it does not change the target or send a provider turn.
+
 ## Verify without credentials or model cost
 
 ```sh

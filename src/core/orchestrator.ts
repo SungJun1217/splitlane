@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   ApprovalDecision,
   AppSnapshot,
+  HandoffPacket,
   LaneActivity,
   LaneActivityKind,
   LaneActivityStatus,
@@ -17,6 +18,7 @@ import type {
   RoleId,
   RoleProfile,
   ReviewMechanism,
+  ReviewLensSnapshot,
   ReviewSnapshot,
   RestorableSession,
   SessionHandle,
@@ -99,6 +101,8 @@ export class CompareOrchestrator {
       lanes: { claude: blankLane("claude", config), codex: blankLane("codex", config) },
       git: this.#git.snapshot,
       roles: { ...(config?.roles ?? M1_PREVIEW_ROLES) },
+      handoffPhase: "scout",
+      handoff: null,
       approvals: [],
       review: null,
       queue: [],
@@ -429,6 +433,84 @@ export class CompareOrchestrator {
     });
   }
 
+  async prepareRoleHandoff(objective: string): Promise<boolean> {
+    const cleanObjective = sanitizeTerminalText(objective).trim();
+    const from = this.#snapshot.handoffPhase;
+    if (from === "builder") {
+      this.#patch({ notice: "Builder is the final v0.1 handoff phase; reset the workflow explicitly to begin another chain." });
+      return false;
+    }
+    const sourceProvider = this.#snapshot.focusedProvider;
+    const lane = this.#snapshot.lanes[sourceProvider];
+    if (!canAccept(lane) || !lane.output.trim()) {
+      this.#patch({ notice: "Role handoff requires completed output in the focused source lane." });
+      return false;
+    }
+    if (!cleanObjective) {
+      this.#patch({ notice: "Role handoff requires an explicit objective in the shared prompt editor." });
+      return false;
+    }
+    const git = await this.#git.refresh();
+    this.#patch({ git });
+    const to = from === "scout" ? "architect" : "builder";
+    const questionLines = lane.output.split("\n").map((line) => sanitizeTerminalText(line).trim()).filter((line) => line.includes("?")).slice(0, 5);
+    const packet: HandoffPacket = Object.freeze({
+      schemaVersion: "handoff-packet/v1",
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+      from,
+      to,
+      recommendedProvider: this.#snapshot.roles[to],
+      objective: cleanObjective.slice(0, 2_048),
+      constraints: Object.freeze([
+        "Do not infer hidden transcript context; use only this packet and repository evidence.",
+        "Preserve Splitlane workspace and permission invariants.",
+        to === "builder" ? "Writing still requires an explicit build-mode writer lease." : "Remain read-only unless the user separately promotes a writer.",
+      ]),
+      relevantFiles: Object.freeze(git.files.slice(0, 50)),
+      openQuestions: Object.freeze(questionLines.length ? questionLines : ["Which assumptions require user confirmation before the next phase?"]),
+      acceptanceCriteria: Object.freeze([
+        `Produce a bounded ${to} artifact that directly addresses the stated objective.`,
+        "Identify unresolved risks and cite relevant files where possible.",
+      ]),
+      sourceProvider,
+      sourceSessionId: lane.sessionId,
+      baselineFingerprint: git.baselineFingerprint ?? createHash("sha256").update(JSON.stringify({ branch: git.branch, files: git.files, diff: git.diff })).digest("hex"),
+      sourceExcerpt: sanitizeTerminalText(lane.output).slice(-8_192),
+    });
+    this.#patch({ handoff: packet, notice: `${from} → ${to} packet ready for inspection; no prompt was sent and target did not change.` });
+    return true;
+  }
+
+  confirmRoleHandoff(): string | null {
+    const packet = this.#snapshot.handoff;
+    if (!packet) return null;
+    const prompt = [
+      `SPLITLANE HANDOFF ${packet.from.toUpperCase()} → ${packet.to.toUpperCase()}`,
+      `Objective:\n${packet.objective}`,
+      `Constraints:\n${packet.constraints.map((item) => `- ${item}`).join("\n")}`,
+      `Relevant files:\n${packet.relevantFiles.length ? packet.relevantFiles.map((item) => `- ${item}`).join("\n") : "- none recorded"}`,
+      `Open questions:\n${packet.openQuestions.map((item) => `- ${item}`).join("\n")}`,
+      `Acceptance criteria:\n${packet.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
+      `Source: ${packet.sourceProvider} session ${packet.sourceSessionId?.slice(0, 12) ?? "new"} · baseline ${packet.baselineFingerprint?.slice(0, 12) ?? "none"}`,
+      `Source artifact:\n${packet.sourceExcerpt}`,
+    ].join("\n\n");
+    this.#patch({
+      handoffPhase: packet.to,
+      handoff: null,
+      notice: `${packet.to} handoff prompt prepared for recommended ${packet.recommendedProvider}; routing remains user-controlled.`,
+    });
+    return prompt;
+  }
+
+  cancelRoleHandoff(): void {
+    if (this.#snapshot.handoff) this.#patch({ handoff: null, notice: "Role handoff packet discarded; nothing was sent." });
+  }
+
+  resetRoleHandoffChain(): void {
+    this.#patch({ handoffPhase: "scout", handoff: null, notice: "Role handoff chain reset to scout; no routing or provider state changed." });
+  }
+
   async promoteWriter(provider: ProviderId, dirtyTreeAcknowledged: boolean): Promise<boolean> {
     if (this.#reviewPending) {
       this.#patch({ notice: "Wait for the review handoff check to finish." });
@@ -570,6 +652,9 @@ export class CompareOrchestrator {
           preview: null,
           stale: false,
           parseError: null,
+          twoLens: false,
+          activeLens: reviewer,
+          lenses: {},
         },
         notice: `Review draft ready for ${reviewer}; writer lease remains active until confirmation.`,
       });
@@ -623,7 +708,8 @@ export class CompareOrchestrator {
       }
       if (!this.#workspace.revoke(lease.id)) throw new Error("Writer lease revocation failed before review.");
       const envelope = Object.freeze({ ...review.envelope, acceptanceCriteria: criteria });
-      const running: ReviewSnapshot = { ...review, status: "running", envelope, findings: [], activeFindingId: null, preview: null, stale: false, parseError: null };
+      const lens: ReviewLensSnapshot = { provider: review.reviewer, mechanism: review.mechanism, status: "running", envelope, findings: [], parseError: null };
+      const running: ReviewSnapshot = { ...review, status: "running", envelope, findings: [], activeFindingId: null, preview: null, stale: false, parseError: null, twoLens: false, activeLens: review.reviewer, lenses: { [review.reviewer]: lens } };
       this.#patchLane(review.reviewer, { output: "", error: null, errorKind: null, toolSummary: "read-only review" });
       this.#patch({
         mode: "review",
@@ -642,6 +728,162 @@ export class CompareOrchestrator {
     } finally {
       this.#reviewPending = false;
     }
+  }
+
+  async startTwoLensReview(acceptanceCriteria: string): Promise<boolean> {
+    const review = this.#snapshot.review;
+    const lease = this.#snapshot.writerLease;
+    const criteria = sanitizeTerminalText(acceptanceCriteria).trim();
+    if (this.#reviewPending || !review || review.status !== "draft" || this.#snapshot.mode !== "build" || !lease || !criteria) {
+      this.#patch({ notice: criteria ? "Two-lens review draft is no longer valid." : "Acceptance criteria are required." });
+      return false;
+    }
+    if (!this.#workspace.validate(lease, review.writer) || this.#snapshot.writer !== review.writer) {
+      this.#patch({ notice: "Two-lens review lost its matching writer lease." });
+      return false;
+    }
+    if ((["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+      this.#patch({ notice: "Two-lens review requires both providers to be idle and available; nothing started." });
+      return false;
+    }
+    this.#reviewPending = true;
+    try {
+      const git = await this.#git.refresh();
+      const current = await captureReviewPatch(git.root, git.evidence, { baseRevision: review.envelope.head });
+      if (current.diffHash !== review.envelope.diffHash) {
+        const envelope = createReviewEnvelope({
+          writer: review.writer,
+          reviewer: review.reviewer,
+          mechanism: review.mechanism,
+          objective: review.envelope.objective,
+          acceptanceCriteria: "",
+          projectRoot: this.projectRoot,
+          baselineFingerprint: lease.baselineFingerprint,
+          patch: current,
+        });
+        this.#patch({ git, review: { ...review, envelope }, notice: "Diff changed while confirming two-lens review; inspect and confirm the refreshed hash." });
+        return false;
+      }
+      if (!this.#workspace.revoke(lease.id)) throw new Error("Writer lease revocation failed before two-lens review.");
+      const mechanisms = (provider: ProviderId): ReviewMechanism => {
+        const generic = `${provider}_generic` as ReviewMechanism;
+        return provider === "codex" && this.#allowPreview && this.adapters.codex.reviewMechanisms?.includes("codex_native")
+          ? "codex_native"
+          : generic;
+      };
+      const lenses = Object.fromEntries((["claude", "codex"] as const).map((provider) => {
+        const mechanism = mechanisms(provider);
+        const envelope = Object.freeze({
+          ...review.envelope,
+          reviewer: provider,
+          mechanism,
+          mechanismStability: reviewMechanismStability(mechanism),
+          acceptanceCriteria: criteria,
+        });
+        const lens: ReviewLensSnapshot = { provider, mechanism, status: "running", envelope, findings: [], parseError: null };
+        return [provider, lens];
+      })) as Record<ProviderId, ReviewLensSnapshot>;
+      this.#sessions.delete("claude");
+      this.#sessions.delete("codex");
+      for (const provider of ["claude", "codex"] as const) {
+        this.#patchLane(provider, { output: "", error: null, errorKind: null, toolSummary: "two-lens read-only review", sessionId: null });
+      }
+      const running: ReviewSnapshot = {
+        ...review,
+        status: "running",
+        envelope: lenses.claude.envelope,
+        reviewer: "claude",
+        mechanism: lenses.claude.mechanism,
+        findings: [],
+        activeFindingId: null,
+        preview: null,
+        stale: false,
+        parseError: null,
+        twoLens: true,
+        activeLens: "claude",
+        lenses,
+      };
+      this.#patch({
+        mode: "review",
+        writer: null,
+        writerLease: null,
+        writerRevoking: false,
+        review: running,
+        focusedProvider: "claude",
+        notice: "Writer paused; Claude and Codex two-lens review started independently and read-only.",
+      });
+      void Promise.allSettled((["claude", "codex"] as const).map((provider) => this.#runTwoLens(provider, review.envelope.id)));
+      return true;
+    } catch (error) {
+      this.#patch({ notice: `Two-lens review start failed: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    } finally {
+      this.#reviewPending = false;
+    }
+  }
+
+  async #runTwoLens(provider: ProviderId, reviewId: string): Promise<void> {
+    const lens = this.#snapshot.review?.lenses[provider];
+    if (!lens) return;
+    const envelope: PromptEnvelope = Object.freeze({ envelopeId: reviewId, createdAt: lens.envelope.createdAt, prompt: buildReviewPrompt(lens.envelope) });
+    await this.#runLane(provider, envelope, lens.mechanism);
+    const currentReview = this.#snapshot.review;
+    if (this.#snapshot.mode !== "review" || !currentReview?.twoLens || currentReview.envelope.id !== reviewId) return;
+    const lane = this.#snapshot.lanes[provider];
+    const parsed = lane.status === "COMPLETED"
+      ? parseReviewFindings(lane.output, provider, lens.mechanism, this.projectRoot)
+      : { findings: [], error: lane.error ?? `Review lens ended with ${lane.status}.` };
+    const status: ReviewLensSnapshot["status"] = lane.status === "COMPLETED" ? "completed" : lane.status === "CANCELLED" ? "cancelled" : "failed";
+    const updatedLens: ReviewLensSnapshot = { ...lens, status, findings: parsed.findings, parseError: parsed.error };
+    const lenses = { ...currentReview.lenses, [provider]: updatedLens };
+    const active = currentReview.activeLens === provider ? updatedLens : lenses[currentReview.activeLens];
+    this.#patch({
+      review: {
+        ...currentReview,
+        lenses,
+        findings: active?.findings ?? [],
+        activeFindingId: active?.findings[0]?.id ?? null,
+        parseError: active?.parseError ?? null,
+      },
+    });
+    const all = (["claude", "codex"] as const).map((id) => this.#snapshot.review?.lenses[id]).filter(Boolean) as ReviewLensSnapshot[];
+    if (all.length !== 2 || all.some((item) => item.status === "running")) return;
+    let stale = true;
+    try {
+      const git = await this.#git.refresh();
+      const patch = await captureReviewPatch(git.root, git.evidence, { baseRevision: lens.envelope.head });
+      stale = patch.diffHash !== lens.envelope.diffHash;
+      this.#patch({ git });
+    } catch {}
+    const review = this.#snapshot.review;
+    if (!review?.twoLens || review.envelope.id !== reviewId) return;
+    const completed = all.filter((item) => item.status === "completed").length;
+    this.#patch({
+      review: { ...review, status: completed ? "completed" : "failed", stale },
+      notice: `Two-lens review finished · Claude ${review.lenses.claude?.status} · Codex ${review.lenses.codex?.status}${stale ? " · STALE" : ""}.`,
+    });
+  }
+
+  selectReviewLens(provider: ProviderId): boolean {
+    const review = this.#snapshot.review;
+    const lens = review?.lenses[provider];
+    if (!review?.twoLens || !lens) return false;
+    this.#patch({
+      focusedProvider: provider,
+      review: {
+        ...review,
+        activeLens: provider,
+        reviewer: provider,
+        mechanism: lens.mechanism,
+        envelope: lens.envelope,
+        findings: lens.findings,
+        activeFindingId: lens.findings[0]?.id ?? null,
+        preview: null,
+        parseError: lens.parseError,
+      },
+      notice: `${provider} review lens selected; findings remain provider-separated.`,
+    });
+    return true;
   }
 
   setReviewMechanism(mechanism: ReviewMechanism): boolean {
@@ -687,7 +929,7 @@ export class CompareOrchestrator {
         ? "cancelled"
         : "failed";
     this.#patch({
-      review: { ...review, status, findings: parsed.findings, activeFindingId: parsed.findings[0]?.id ?? null, preview: null, stale, parseError: parsed.error },
+      review: { ...review, status, findings: parsed.findings, activeFindingId: parsed.findings[0]?.id ?? null, preview: null, stale, parseError: parsed.error, lenses: { [review.reviewer]: { provider: review.reviewer, mechanism: review.mechanism, status: status === "completed" ? "completed" : status === "cancelled" ? "cancelled" : "failed", envelope: review.envelope, findings: parsed.findings, parseError: parsed.error } } },
       notice: parsed.error
         ? `Review finished without structured findings: ${parsed.error}`
         : `Review completed with ${parsed.findings.length} finding(s)${stale ? " · STALE" : ""}.`,
@@ -697,10 +939,15 @@ export class CompareOrchestrator {
   toggleFinding(id: string): void {
     const review = this.#snapshot.review;
     if (!review) return;
+    const findings = review.findings.map((finding) => finding.id === id ? { ...finding, selected: !finding.selected } : finding);
+    const activeLens = review.lenses[review.activeLens];
     this.#patch({
       review: {
         ...review,
-        findings: review.findings.map((finding) => finding.id === id ? { ...finding, selected: !finding.selected } : finding),
+        findings,
+        lenses: review.twoLens && activeLens
+          ? { ...review.lenses, [review.activeLens]: { ...activeLens, findings } }
+          : review.lenses,
       },
     });
   }

@@ -246,3 +246,18 @@ or authorize paid live model turns.
 - Type checking, 77 offline tests, macOS/Linux standalone builds, the locally
   generated Codex resume schema, reset-modal rendering, and terminal restoration
   passed without credentials or a model turn.
+
+### 2026-07-26 — Two-lens review and role handoff
+
+- Added an explicit two-lens start that revokes the writer lease, freezes one
+  objective/criteria/Git diff identity, and runs Claude and Codex read-only with
+  independent status, cancellation, parser errors, and attributed findings.
+- Added lens switching without merging, deduplicating, grading, or claiming
+  agreement. A selected finding relay comes from one visible lens only.
+- Added bounded scout → architect → builder packets with objective, constraints,
+  files, questions, acceptance criteria, source provider/session, and Git
+  fingerprint. Confirmation prepares the editor but never changes routing or
+  starts a turn.
+- Type checking and 80 offline tests cover same-diff identity, independent
+  completion/failure/cancellation, provider-attributed findings, single-lens
+  relay, bounded Korean handoff rendering, and zero implicit dispatch.

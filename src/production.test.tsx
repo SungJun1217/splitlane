@@ -507,6 +507,37 @@ describe("production orchestrator", () => {
     expect(burst.getSnapshot().lanes.claude.activities.at(-1)).toMatchObject({ kind: "file", detail: "src/한글.ts" });
     await burst.close();
   });
+
+  test("role handoffs prepare bounded packets without routing or dispatching", async () => {
+    const { orchestrator, claude, codex } = setup("complete", "complete");
+    await orchestrator.initialize();
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("Scout the repository");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(await orchestrator.prepareRoleHandoff("Design the safest implementation plan")).toBe(true);
+    expect(orchestrator.getSnapshot().handoff).toMatchObject({
+      schemaVersion: "handoff-packet/v1",
+      from: "scout",
+      to: "architect",
+      sourceProvider: "claude",
+      recommendedProvider: orchestrator.getSnapshot().roles.architect,
+    });
+    expect(claude.prompts).toHaveLength(1);
+    expect(codex.prompts).toHaveLength(0);
+    const architectPrompt = orchestrator.confirmRoleHandoff();
+    expect(architectPrompt).toContain("SCOUT → ARCHITECT");
+    expect(orchestrator.getSnapshot().target).toBe("claude");
+    expect(orchestrator.getSnapshot().handoffPhase).toBe("architect");
+    expect(await orchestrator.prepareRoleHandoff("Produce an implementation-ready packet")).toBe(true);
+    expect(orchestrator.getSnapshot().handoff).toMatchObject({ from: "architect", to: "builder" });
+    const builderPrompt = orchestrator.confirmRoleHandoff();
+    expect(builderPrompt).toContain("ARCHITECT → BUILDER");
+    expect(claude.prompts).toHaveLength(1);
+    expect(codex.prompts).toHaveLength(0);
+    orchestrator.resetRoleHandoffChain();
+    expect(orchestrator.getSnapshot().handoffPhase).toBe("scout");
+    await orchestrator.close();
+  });
 });
 
 describe("configuration", () => {
@@ -704,6 +735,30 @@ describe("terminal rendering", () => {
     expect(restore).toContain("METADATA ONLY · NO AUTHORITY");
     expect(restore).toContain("INTERRUPTED");
     expect(restore).toContain("Press R again");
+
+    const handoff = renderToString(
+      <SplitlaneView snapshot={{ ...snapshot, handoff: {
+        schemaVersion: "handoff-packet/v1",
+        id: "handoff",
+        createdAt: new Date(0).toISOString(),
+        from: "scout",
+        to: "architect",
+        recommendedProvider: "claude",
+        objective: "한글 프로젝트를 설계한다",
+        constraints: ["read-only"],
+        relevantFiles: ["src/한글.ts"],
+        openQuestions: ["경계는?"],
+        acceptanceCriteria: ["명시적 계획"],
+        sourceProvider: "codex",
+        sourceSessionId: "codex-session",
+        baselineFingerprint: "baseline",
+        sourceExcerpt: "조사 결과",
+      } }} prompt="" columns={90} rows={30} overlay="handoff" />,
+      { columns: 90 },
+    );
+    expect(handoff).toContain("NO AUTO-DISPATCH");
+    expect(handoff).toContain("SCOUT → ARCHITECT");
+    expect(handoff).toContain("target unchanged");
   });
 
   test("renders writer confirmation and approval safety details", () => {
@@ -775,6 +830,9 @@ describe("terminal rendering", () => {
         envelope: { ...envelope, acceptanceCriteria: "회귀 없음" },
         stale: true,
         parseError: null,
+        twoLens: false,
+        activeLens: "codex",
+        lenses: {},
         findings: [{
           id: "finding-ko",
           provider: "codex",
@@ -812,6 +870,25 @@ describe("terminal rendering", () => {
     expect(findings).toContain("STALE");
     expect(findings).toContain("한글 경계 오류");
     expect(findings).toContain("paused CLAUDE");
+
+    const twoLensSnapshot: AppSnapshot = {
+      ...reviewSnapshot,
+      review: reviewSnapshot.review && {
+        ...reviewSnapshot.review,
+        twoLens: true,
+        activeLens: "codex",
+        lenses: {
+          claude: { provider: "claude", mechanism: "claude_generic", status: "failed", envelope: { ...envelope, reviewer: "claude", mechanism: "claude_generic" }, findings: [], parseError: "failed independently" },
+          codex: { provider: "codex", mechanism: "codex_generic", status: "completed", envelope, findings: reviewSnapshot.review.findings, parseError: null },
+        },
+      },
+    };
+    const twoLens = renderToString(
+      <SplitlaneView snapshot={twoLensSnapshot} prompt="" columns={90} rows={30} overlay="findings" />,
+      { columns: 90 },
+    );
+    expect(twoLens).toContain("Claude failed · Codex completed");
+    expect(twoLens).toContain("never merged/graded");
   });
 });
 
@@ -967,6 +1044,68 @@ describe("M3 reviewer handoff", () => {
       expect(relay).toContain("The changed branch lacks a guard.");
       expect(orchestrator.getSnapshot().mode).toBe("compare");
       expect(orchestrator.getSnapshot().review?.status).toBe("returned");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("two-lens review freezes one diff and keeps provider findings independent", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "review_findings");
+      const codex = new FakeAdapter("codex", "review_findings");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Implement the shared review target");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "two lens\n");
+      expect(await orchestrator.prepareReview()).toBe(true);
+      expect(await orchestrator.startTwoLensReview("Both lenses verify the same frozen diff.")).toBe(true);
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "completed");
+      const review = orchestrator.getSnapshot().review;
+      expect(review?.twoLens).toBe(true);
+      expect(review?.lenses.claude).toMatchObject({ provider: "claude", status: "completed" });
+      expect(review?.lenses.codex).toMatchObject({ provider: "codex", status: "completed" });
+      expect(review?.lenses.claude?.envelope.id).toBe(review?.lenses.codex?.envelope.id);
+      expect(review?.lenses.claude?.envelope.diffHash).toBe(review?.lenses.codex?.envelope.diffHash);
+      expect(review?.lenses.claude?.findings[0]?.provider).toBe("claude");
+      expect(review?.lenses.codex?.findings[0]?.provider).toBe("codex");
+      expect(claude.turnOptions.at(-1)?.workspaceAccess).toBe("read_only");
+      expect(codex.turnOptions.at(-1)?.workspaceAccess).toBe("read_only");
+      expect(orchestrator.selectReviewLens("codex")).toBe(true);
+      orchestrator.toggleFinding("finding-1");
+      const relay = orchestrator.returnSelectedFindings(false);
+      expect(relay).toContain("source: codex");
+      expect(relay).not.toContain("source: claude");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("one two-lens reviewer can be cancelled without cancelling the other", async () => {
+    const root = await reviewRepository();
+    try {
+      const claude = new FakeAdapter("claude", "review_delayed");
+      const codex = new FakeAdapter("codex", "review_findings");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      await orchestrator.promoteWriter("claude", false);
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("Implement then review independently");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await Bun.write(join(root, "existing.txt"), "cancel one lens\n");
+      await orchestrator.prepareReview();
+      await orchestrator.startTwoLensReview("Cancellation remains lane-local.");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "RUNNING" && orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
+      await orchestrator.cancel("claude");
+      await waitFor(() => orchestrator.getSnapshot().review?.status === "completed");
+      expect(orchestrator.getSnapshot().review?.lenses.claude?.status).toBe("cancelled");
+      expect(orchestrator.getSnapshot().review?.lenses.codex?.status).toBe("completed");
+      expect(codex.interrupted).toHaveLength(0);
       await orchestrator.close();
     } finally {
       await rm(root, { recursive: true, force: true });

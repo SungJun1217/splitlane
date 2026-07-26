@@ -279,6 +279,18 @@ export interface ReviewSnapshot {
   preview: ReviewFilePreview | null;
   stale: boolean;
   parseError: string | null;
+  twoLens: boolean;
+  activeLens: ProviderId;
+  lenses: Readonly<Partial<Record<ProviderId, ReviewLensSnapshot>>>;
+}
+
+export interface ReviewLensSnapshot {
+  provider: ProviderId;
+  mechanism: ReviewMechanism;
+  status: Exclude<ReviewStatus, "draft" | "accepted" | "exited" | "returned">;
+  envelope: ReviewEnvelope;
+  findings: readonly ReviewFinding[];
+  parseError: string | null;
 }
 
 export type RoleId =
@@ -290,6 +302,25 @@ export type RoleId =
   | "correctness_reviewer";
 
 export type RoleProfile = Record<RoleId, ProviderId>;
+export type HandoffPhase = "scout" | "architect" | "builder";
+
+export interface HandoffPacket {
+  schemaVersion: "handoff-packet/v1";
+  id: string;
+  createdAt: string;
+  from: HandoffPhase;
+  to: Exclude<HandoffPhase, "scout">;
+  recommendedProvider: ProviderId;
+  objective: string;
+  constraints: readonly string[];
+  relevantFiles: readonly string[];
+  openQuestions: readonly string[];
+  acceptanceCriteria: readonly string[];
+  sourceProvider: ProviderId;
+  sourceSessionId: string | null;
+  baselineFingerprint: string | null;
+  sourceExcerpt: string;
+}
 
 export interface AppSnapshot {
   mode: WorkflowMode;
@@ -302,6 +333,8 @@ export interface AppSnapshot {
   lanes: Record<ProviderId, LaneSnapshot>;
   git: GitSnapshot;
   roles: RoleProfile;
+  handoffPhase: HandoffPhase;
+  handoff: HandoffPacket | null;
   approvals: readonly PendingApproval[];
   review: ReviewSnapshot | null;
   queue: readonly QueueItem[];

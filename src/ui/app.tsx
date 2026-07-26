@@ -6,7 +6,7 @@ import { providerErrorAction } from "../core/provider-error.ts";
 import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
 import { lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -134,7 +134,8 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
             {index === roleIndex ? ">" : " "} {role}: {snapshot.roles[role]}
           </Text>
         ))}
-        <Text dimColor>↑/↓ role · Tab provider · Enter apply · Esc close</Text>
+        <Text>active handoff phase: {snapshot.handoffPhase}</Text>
+        <Text dimColor>↑/↓ role · Tab provider · Enter apply · X reset handoff chain · Esc close</Text>
       </Box>
     );
   }
@@ -197,7 +198,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>objective: {tailLines(review.envelope.objective, 2)}</Text>
         <Text>acceptance criteria: <Text color="cyan">{reviewCriteria || " "}</Text></Text>
         <Text color="yellow">Enter revokes the writer lease before dispatch. Network and writes stay off.</Text>
-        <Text dimColor>Type criteria · Tab mechanism · Enter start · Esc keep build</Text>
+        <Text dimColor>Type criteria · Tab mechanism · Enter single lens · T two lenses · Esc keep build</Text>
       </Box>
     );
   }
@@ -207,13 +208,14 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
     return (
       <Box borderStyle="double" borderColor={review?.stale ? "red" : "magenta"} flexDirection="column" paddingX={1}>
         <Text bold>REVIEW FINDINGS · {review?.status.toUpperCase() ?? "NONE"} · {review?.stale ? "STALE" : "CURRENT"}</Text>
+        {review?.twoLens ? <Text>lens: {review.activeLens.toUpperCase()} · Claude {review.lenses.claude?.status} · Codex {review.lenses.codex?.status} · never merged/graded</Text> : null}
         {finding ? <>
           <Text>{finding.selected ? "[x]" : "[ ]"} {finding.severity.toUpperCase()} · {finding.title}</Text>
           <Text>{finding.file ?? "general"}{finding.lineStart ? `:${finding.lineStart}` : ""}</Text>
           <Text>{tailLines(finding.body, 5)}</Text>
           {finding.verification ? <Text dimColor>verify: {finding.verification}</Text> : null}
         </> : <Text>{review?.parseError ?? (review?.status === "running" ? "Review is running…" : "No structured findings.")}</Text>}
-        <Text dimColor>↑/↓ finding · Space select · A accept · E exit · S stale ack ({staleAcknowledged ? "yes" : "no"}) · R return selected</Text>
+        <Text dimColor>{review?.twoLens ? "Tab lens · " : ""}↑/↓ finding · Space select · A accept · E exit · S stale ack ({staleAcknowledged ? "yes" : "no"}) · R return selected</Text>
       </Box>
     );
   }
@@ -248,7 +250,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>Prompt: Enter send · Ctrl+R target · Option+1/2 focus</Text>
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
         <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics · Ctrl+K queue</Text>
-        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings</Text>
+        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Ctrl+H handoff</Text>
         <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
@@ -320,6 +322,24 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>session: {lane.sessionId?.slice(0, 12) ?? "new"} · model {lane.requestedModel}</Text>
         <Text>The other lane and provider-owned history are unchanged.</Text>
         <Text color="yellow">{destructiveConfirm ? "Press R again to remove this lane's metadata." : "R review confirmation · Esc close"}</Text>
+      </Box>
+    );
+  }
+  if (overlay === "handoff") {
+    const packet = snapshot.handoff;
+    return (
+      <Box borderStyle="double" borderColor="magenta" flexDirection="column" paddingX={1}>
+        <Text bold>ROLE HANDOFF · EXPLICIT BOUNDED PACKET · NO AUTO-DISPATCH</Text>
+        {packet ? <>
+          <Text>{packet.from.toUpperCase()} → {packet.to.toUpperCase()} · recommended {packet.recommendedProvider.toUpperCase()} · target unchanged</Text>
+          <Text>objective: {tailLines(packet.objective, 2)}</Text>
+          <Text>constraints: {packet.constraints.join(" · ")}</Text>
+          <Text>files: {packet.relevantFiles.slice(0, 8).join(", ") || "none"}</Text>
+          <Text>questions: {packet.openQuestions.slice(0, 3).join(" · ")}</Text>
+          <Text>criteria: {packet.acceptanceCriteria.join(" · ")}</Text>
+          <Text>source: {packet.sourceProvider} · session {packet.sourceSessionId?.slice(0, 12) ?? "new"} · baseline {packet.baselineFingerprint?.slice(0, 12) ?? "none"}</Text>
+          <Text dimColor>Enter prepare shared prompt · Esc discard · sending remains a separate user action</Text>
+        </> : <Text>Handoff packet unavailable. Esc close.</Text>}
       </Box>
     );
   }
@@ -468,6 +488,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     }
     if (key.escape) {
       if (overlay === "queue_offer") orchestrator.cancelQueueOffer();
+      if (overlay === "handoff") orchestrator.cancelRoleHandoff();
       setOverlay(null);
       setWriterConfirm(false);
       setDestructiveConfirm(false);
@@ -538,6 +559,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       if (key.upArrow) setRoleIndex((index) => (index - 1 + ROLE_IDS.length) % ROLE_IDS.length);
       else if (key.downArrow) setRoleIndex((index) => (index + 1) % ROLE_IDS.length);
       else if (key.tab) setRoleProvider((provider) => provider === "claude" ? "codex" : "claude");
+      else if (input.toLowerCase() === "x") orchestrator.resetRoleHandoffChain();
       else if (key.return) {
         orchestrator.setRole(ROLE_IDS[roleIndex] ?? "scout", roleProvider);
         setOverlay(null);
@@ -582,6 +604,8 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
         const index = mechanisms.indexOf(snapshot.review.mechanism);
         const next = mechanisms[(index + 1) % mechanisms.length];
         if (next) orchestrator.setReviewMechanism(next);
+      } else if (input.toLowerCase() === "t") {
+        void orchestrator.startTwoLensReview(reviewCriteria).then((started) => { if (started) setOverlay(null); });
       } else if (key.return) {
         void orchestrator.startReview(reviewCriteria).then((started) => { if (started) setOverlay(null); });
       } else if (key.backspace || key.delete) setReviewCriteria(removeLastGrapheme(reviewCriteria));
@@ -590,7 +614,11 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     }
     if (overlay === "findings") {
       const count = Math.max(1, snapshot.review?.findings.length ?? 0);
-      if (key.upArrow) {
+      if (key.tab && snapshot.review?.twoLens) {
+        const next = snapshot.review.activeLens === "claude" ? "codex" : "claude";
+        orchestrator.selectReviewLens(next);
+        setFindingIndex(0);
+      } else if (key.upArrow) {
         const next = (findingIndex - 1 + count) % count;
         setFindingIndex(next);
         const finding = snapshot.review?.findings[next];
@@ -615,6 +643,16 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
             setWriterConfirm(false);
             setOverlay("writer");
           }
+        }
+      }
+      return;
+    }
+    if (overlay === "handoff") {
+      if (key.return) {
+        const handoffPrompt = orchestrator.confirmRoleHandoff();
+        if (handoffPrompt) {
+          setPrompt(handoffPrompt);
+          setOverlay(null);
         }
       }
       return;
@@ -689,6 +727,9 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (key.ctrl && input === "n") {
       setDestructiveConfirm(false);
       setOverlay("reset_session");
+    }
+    else if (key.ctrl && input === "h") {
+      void orchestrator.prepareRoleHandoff(prompt).then((ready) => { if (ready) setOverlay("handoff"); });
     }
     else if (key.ctrl && input === "d") setOverlay("diagnostics");
     else if (key.ctrl && input === "o") {
