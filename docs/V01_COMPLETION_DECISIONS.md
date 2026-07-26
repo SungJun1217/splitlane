@@ -278,3 +278,16 @@ or authorize paid live model turns.
   tree isolation, provider-local approvals, dirty and unintegrated retention,
   restart recovery, clean cleanup, branch preservation, and dirty-primary
   refusal. No provider model turn or network access was used.
+
+### 2026-07-26 — Compatibility doctor and packaging gate
+
+- Added `splitlane doctor [project] [--json]` with a versioned `doctor/v1`
+  report for binary/help discovery, coarse auth classification, local Codex
+  schema generation, sandbox contract checks, and app-server initialization.
+- Doctor starts no Claude query, Codex thread, or provider turn; it uses no
+  bypass flag, never prints raw auth output, and writes neither provider config
+  nor credentials. Provider failures remain separately attributed.
+- Fake-provider tests prove successful initialization, zero thread/turn calls,
+  missing-binary failures, and secret-free human/JSON output. The installed
+  Claude Code 2.1.220 and Codex CLI 0.145.0 probe passes required transports;
+  native Codex review remains a visible local capability warning.

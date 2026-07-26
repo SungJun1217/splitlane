@@ -6,8 +6,50 @@ import { ClaudeAdapter } from "./providers/claude.ts";
 import { CodexAdapter } from "./providers/codex.ts";
 import { App } from "./ui/app.tsx";
 import { discoverProjectRoot, loadConfig } from "./config/config.ts";
+import { formatDoctor, runDoctor } from "./compat/doctor.ts";
+import packageJson from "../package.json";
+
+const HELP = `Splitlane ${packageJson.version}
+
+Usage:
+  splitlane [project]
+  splitlane doctor [project] [--json]
+
+Commands:
+  doctor    Probe local CLI, auth, schema, sandbox, and transport compatibility
+            without starting a provider thread or model turn.
+
+Options:
+  --json     Print doctor/v1 JSON (doctor only)
+  --help     Show this help
+  --version  Show the Splitlane version
+`;
 
 export async function run(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  if (argv[0] === "--help" || argv[0] === "-h") {
+    process.stdout.write(HELP);
+    return;
+  }
+  if (argv[0] === "--version" || argv[0] === "-v") {
+    process.stdout.write(`${packageJson.version}\n`);
+    return;
+  }
+  if (argv[0] === "doctor" || argv[0] === "--doctor") {
+    const doctorArgs = argv.slice(1);
+    const unknown = doctorArgs.find((value) => value.startsWith("-") && value !== "--json");
+    const roots = doctorArgs.filter((value) => !value.startsWith("-"));
+    if (unknown || roots.length > 1) {
+      console.error(unknown ? `Unknown doctor option: ${unknown}` : "Doctor accepts at most one project path.");
+      process.exitCode = 2;
+      return;
+    }
+    const requestedRoot = resolve(roots[0] ?? process.cwd());
+    const projectRoot = await discoverProjectRoot(requestedRoot);
+    const report = await runDoctor({ projectRoot });
+    process.stdout.write(doctorArgs.includes("--json") ? `${JSON.stringify(report, null, 2)}\n` : formatDoctor(report));
+    if (report.status === "fail") process.exitCode = 1;
+    return;
+  }
   const requestedRoot = resolve(argv[0] ?? process.cwd());
   const projectRoot = await discoverProjectRoot(requestedRoot);
   let config;

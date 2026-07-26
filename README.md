@@ -45,6 +45,18 @@ bun run dev /path/to/project
 Starting Splitlane probes local CLI versions but does not start a model turn.
 Pressing Enter with a prompt does start a turn for the selected target.
 
+Check the local installation without starting a provider thread or model turn:
+
+```sh
+splitlane doctor /path/to/project
+splitlane doctor /path/to/project --json
+```
+
+Doctor reports binary/version/help compatibility, coarse authentication state,
+locally generated Codex schema support, sandbox contracts, and a Codex
+app-server `initialize` handshake. It never prints raw auth output, starts a
+provider thread, modifies provider configuration, or persists credentials.
+
 The footer lists every keyboard action. Important controls are `Ctrl+R` for the
 target, `Alt+1`/`Alt+2` for lane focus, `Ctrl+B` for two-step writer promotion,
 `Ctrl+W` to revoke the writer, `Ctrl+A` for pending approvals, `Ctrl+X` for

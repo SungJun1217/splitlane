@@ -35,6 +35,7 @@ import { FINDINGS_END, FINDINGS_START, parseReviewFindings } from "./review/find
 import { loadFindingPreview } from "./review/preview.ts";
 import { configPaths, discoverProjectRoot, loadConfig, parseConfig } from "./config/config.ts";
 import { SessionStore, projectIdentity } from "./session/store.ts";
+import { formatDoctor, runDoctor } from "./compat/doctor.ts";
 
 type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
 
@@ -547,6 +548,45 @@ describe("production orchestrator", () => {
     orchestrator.resetRoleHandoffChain();
     expect(orchestrator.getSnapshot().handoffPhase).toBe("scout");
     await orchestrator.close();
+  });
+});
+
+describe("local compatibility doctor", () => {
+  test("checks both providers without starting a thread or leaking auth output", async () => {
+    const fixture = join(process.cwd(), "test", "fixtures", "fake-doctor-provider.mjs");
+    const report = await runDoctor({
+      projectRoot: process.cwd(),
+      claude: { command: process.execPath, argsPrefix: [fixture, "claude"] },
+      codex: { command: process.execPath, argsPrefix: [fixture, "codex"] },
+    });
+    expect(report.status).toBe("warn");
+    expect(report.safety).toEqual({
+      modelTurnsStarted: 0,
+      threadsStarted: 0,
+      bypassFlagsUsed: false,
+      providerConfigModified: false,
+      credentialsPersisted: false,
+    });
+    expect(report.providers.claude).toMatchObject({ available: true, auth: "authenticated" });
+    expect(report.providers.codex).toMatchObject({ available: true, auth: "authenticated" });
+    expect(report.providers.codex.checks.find((item) => item.id === "transport_initialize")?.status).toBe("pass");
+    expect(report.providers.codex.checks.find((item) => item.id === "native_review")?.status).toBe("pass");
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toContain("must-not-leak");
+    expect(formatDoctor(report)).toContain("0 model turns · 0 threads");
+  });
+
+  test("reports missing binaries as provider-local failures", async () => {
+    const missing = join(tmpdir(), `splitlane-missing-${Date.now()}`);
+    const report = await runDoctor({
+      projectRoot: process.cwd(),
+      claude: { command: missing },
+      codex: { command: missing },
+    });
+    expect(report.status).toBe("fail");
+    expect(report.providers.claude.available).toBe(false);
+    expect(report.providers.codex.available).toBe(false);
+    expect(report.providers.claude.checks[0]?.id).toBe("binary");
   });
 });
 
