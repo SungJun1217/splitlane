@@ -853,6 +853,12 @@ Bun packaging before this becomes a distribution commitment. OpenTUI remains a
 fallback if Ink fails those gates; adopting its Zig/FFI core would require a new
 packaging decision.
 
+Distribution follow-up approved on 2026-07-26: publish the current M1 preview as
+checksum-verified macOS arm64 and Linux x86_64 standalone executables through
+GitHub Releases. This narrow install path is defined in
+`docs/M1_DISTRIBUTION.md`; it does not complete the wider M6 platform, signing,
+completion, or reproducibility scope.
+
 Research supports two viable approaches:
 
 | Option | Strengths | Risks |
@@ -949,6 +955,10 @@ Exit gate: reviewer cannot modify the workspace and the user can trace every han
 - Reproducible release artifacts.
 - No automatic provider installation or config mutation.
 
+The macOS arm64/Linux x86_64 GitHub Release and checksum-verifying installer
+slice was pulled forward after M1. Remaining platforms and release-hardening
+items stay in M6.
+
 ## 18. Test strategy
 
 ### Unit
@@ -1032,8 +1042,9 @@ v0.1 is ready only when:
 2. v0.1 workspace: approve current-tree single writer, with worktrees deferred to M5.
 3. Transport fallback: decide whether Claude build mode should be withheld if supported approval callbacks cannot be proven, rather than falling back to PTY scraping.
 4. Technology: approved TypeScript/Bun proposal with Claude Agent SDK and Codex
-   app-server as separate provider transports. Bun release packaging remains
-   gated on M1/M6 artifact validation.
+   app-server as separate provider transports. The macOS arm64 and Linux x86_64
+   GitHub Release paths are approved; wider Bun release packaging remains gated
+   on M6 artifact validation.
 5. Persistence: decide whether transcripts are off by default or retained locally by default.
 6. Final product name and CLI command.
 7. Approve the initial native capability set: Claude Plan, conditional Claude Explore subagent, Codex Review diff, and Codex Structured findings.
