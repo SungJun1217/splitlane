@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splitlane.local/schemas/normalized-event.schema.json",
+  "title": "Splitlane normalized provider event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "provider",
+    "session_id",
+    "turn_id",
+    "timestamp",
+    "kind",
+    "payload",
+    "raw_version"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "provider": { "enum": ["claude", "codex"] },
+    "session_id": { "type": ["string", "null"] },
+    "turn_id": { "type": ["string", "null"] },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "kind": {
+      "enum": [
+        "session.started",
+        "session.resumed",
+        "turn.started",
+        "message.delta",
+        "message.completed",
+        "tool.started",
+        "tool.progress",
+        "tool.completed",
+        "file.changed",
+        "approval.requested",
+        "approval.resolved",
+        "usage.updated",
+        "turn.completed",
+        "turn.failed",
+        "turn.cancelled",
+        "provider.warning"
+      ]
+    },
+    "payload": { "type": "object" },
+    "raw_version": { "type": ["string", "null"] },
+    "capability_id": { "type": "string" },
+    "capability_stability": { "enum": ["stable", "preview", "experimental"] },
+    "native_event_kind": { "type": "string" },
+    "safety_effect": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["capability_id"] },
+      "then": { "required": ["capability_stability", "native_event_kind", "safety_effect"] }
+    }
+  ]
+}

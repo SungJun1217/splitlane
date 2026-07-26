@@ -1,0 +1,30 @@
+{
+  "fixture_version": 1,
+  "captured_from": "codex-cli 0.145.0",
+  "model_turn_started": false,
+  "request": {
+    "method": "thread/start",
+    "params": {
+      "cwd": "<project-root>",
+      "sandbox": "read-only",
+      "approvalPolicy": "never",
+      "ephemeral": true
+    }
+  },
+  "result_summary": {
+    "threadId": "<opaque-id>",
+    "effectiveModel": "gpt-5.6-sol",
+    "modelProvider": "openai",
+    "approvalPolicy": "never",
+    "sandbox": {
+      "type": "readOnly",
+      "networkAccess": false
+    },
+    "ephemeral": true
+  },
+  "resume_attempt": {
+    "method": "thread/resume",
+    "ok": false,
+    "error": "no rollout found for thread id <opaque-id>"
+  }
+}

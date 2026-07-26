@@ -1,0 +1,28 @@
+{
+  "fixture_version": 1,
+  "captured_from": "codex-cli 0.145.0",
+  "model_turn_started": false,
+  "request": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "clientInfo": {
+        "name": "splitlane-protocol-spike",
+        "title": "Splitlane Protocol Spike",
+        "version": "0.0.0"
+      },
+      "capabilities": {
+        "experimentalApi": false
+      }
+    }
+  },
+  "response": {
+    "id": 1,
+    "result": {
+      "userAgent": "splitlane-protocol-spike/0.145.0 (<redacted-platform-detail>)",
+      "codexHome": "<redacted>",
+      "platformFamily": "unix",
+      "platformOs": "macos"
+    }
+  }
+}

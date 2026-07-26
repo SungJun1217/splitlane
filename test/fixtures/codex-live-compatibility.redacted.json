@@ -1,0 +1,40 @@
+{
+  "fixture_version": 1,
+  "captured_at": "2026-07-26T04:35:56.827Z",
+  "provider": "codex",
+  "cli_version": "0.145.0",
+  "transport": "app-server",
+  "workspace": "temporary",
+  "first": {
+    "thread_id": "<opaque-id>",
+    "effective_model": "gpt-5.6-sol",
+    "sandbox": { "type": "readOnly", "networkAccess": false },
+    "approval_policy": "never",
+    "text_deltas_observed": true,
+    "result": "completed",
+    "text": "SPLITLANE_CODEX_OK"
+  },
+  "resume": {
+    "same_thread_id": true,
+    "requested_model": "gpt-5.6-sol",
+    "effective_model": "gpt-5.6-sol",
+    "result": "completed",
+    "text": "SPLITLANE_CODEX_RESUMED."
+  },
+  "interrupt": {
+    "request_response_completed": true,
+    "turn_status": "interrupted"
+  },
+  "approval": {
+    "request_method": "item/commandExecution/requestApproval",
+    "request_id": "<opaque-id>",
+    "decision": "cancel",
+    "response_accepted": true,
+    "turn_status": "interrupted",
+    "file_created": false
+  },
+  "cleanup": {
+    "persistent_thread_archived": true,
+    "approval_thread_ephemeral": true
+  }
+}

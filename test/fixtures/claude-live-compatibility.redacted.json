@@ -1,0 +1,32 @@
+{
+  "fixture_version": 1,
+  "captured_at": "2026-07-26T04:33:38.318Z",
+  "provider": "claude",
+  "cli_version": "2.1.220",
+  "workspace": "temporary",
+  "first": {
+    "transport": "cli.stream-json",
+    "effective_model": "claude-opus-5",
+    "session_id": "<opaque-id>",
+    "text_deltas_observed": true,
+    "result": "success",
+    "text": "SPLITLANE_CLAUDE_OK"
+  },
+  "resume": {
+    "same_session_id": true,
+    "effective_model": "claude-opus-5",
+    "result": "success",
+    "text": "SPLITLANE_CLAUDE_RESUMED"
+  },
+  "interrupt": {
+    "stream_started": true,
+    "process_signal": "SIGKILL",
+    "sigterm_grace_ms": 500,
+    "exited_within_grace": false
+  },
+  "cli_approval": {
+    "public_control_request_observed": false,
+    "public_control_response_proven": false,
+    "outcome": "blocked"
+  }
+}

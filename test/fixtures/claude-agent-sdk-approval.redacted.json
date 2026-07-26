@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "captured_at": "2026-07-26T04:37:18.692Z",
+  "provider": "claude",
+  "transport": "official-agent-sdk",
+  "sdk_version": "0.3.220",
+  "effective_model": "claude-opus-5",
+  "session_id": "<opaque-id>",
+  "approval": {
+    "callback": "canUseTool",
+    "tool_name": "Bash",
+    "input_keys": ["command", "description"],
+    "tool_use_id_present": true,
+    "suggestions_present": true,
+    "decision": "deny",
+    "response_accepted": true,
+    "file_created": false
+  },
+  "result": "success"
+}

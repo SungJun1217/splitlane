@@ -1,0 +1,13 @@
+{
+  "fixture_version": 1,
+  "captured_from": "claude-agent-sdk 0.3.220",
+  "redacted": true,
+  "events": [
+    { "type": "system", "subtype": "init", "session_id": "<opaque-id>", "model": "claude-test" },
+    { "type": "stream_event", "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": "안녕" } } },
+    { "type": "assistant", "message": { "content": [{ "type": "tool_use", "name": "Read", "id": "<opaque-id>", "input": {} }] } },
+    { "type": "result", "subtype": "success", "is_error": false },
+    { "unexpected": true }
+  ],
+  "error_event": { "type": "result", "subtype": "error_during_execution", "is_error": true, "result": "<redacted-error>" }
+}

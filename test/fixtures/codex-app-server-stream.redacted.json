@@ -1,0 +1,16 @@
+{
+  "fixture_version": 1,
+  "captured_from": "codex-cli 0.145.0 app-server",
+  "redacted": true,
+  "events": [
+    { "method": "turn/started", "params": { "threadId": "<opaque-id>", "turn": { "id": "<opaque-id>" } } },
+    { "method": "item/agentMessage/delta", "params": { "threadId": "<opaque-id>", "turnId": "<opaque-id>", "delta": "안녕" } },
+    { "method": "item/started", "params": { "threadId": "<opaque-id>", "turnId": "<opaque-id>", "item": { "type": "commandExecution" } } },
+    { "method": "item/completed", "params": { "threadId": "<opaque-id>", "turnId": "<opaque-id>", "item": { "type": "commandExecution" } } },
+    { "method": "turn/completed", "params": { "threadId": "<opaque-id>", "turn": { "id": "<opaque-id>", "status": "completed" } } },
+    { "method": "unknown/future", "params": {} },
+    { "method": "diagnostic/malformed", "params": { "line": "<redacted>" } }
+  ],
+  "failed_event": { "method": "turn/completed", "params": { "threadId": "<opaque-id>", "turn": { "id": "<opaque-id>", "status": "failed" } } },
+  "cancelled_event": { "method": "turn/completed", "params": { "threadId": "<opaque-id>", "turn": { "id": "<opaque-id>", "status": "interrupted" } } }
+}

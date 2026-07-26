@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "status": "definitions-only",
+  "requires_explicit_live_opt_in": true,
+  "cases": [
+    {
+      "id": "scout-repository-map",
+      "role": "scout",
+      "task": "Map a fixture repository for a narrowly described feature without proposing edits.",
+      "required_artifact": ["relevant files", "data/control flow", "constraints", "open questions", "evidence paths"],
+      "rubric": ["all claims cite repository evidence", "no workspace mutation", "uncertainty is explicit"]
+    },
+    {
+      "id": "architect-bounded-plan",
+      "role": "architect",
+      "task": "Produce a minimal implementation brief from a fixed requirement and repository map.",
+      "required_artifact": ["scope", "architecture boundaries", "safety decisions", "acceptance criteria", "test plan"],
+      "rubric": ["respects stated non-goals", "does not invent product decisions", "plan is implementable"]
+    },
+    {
+      "id": "builder-small-change",
+      "role": "builder",
+      "task": "Implement an approved small change in a disposable fixture repository.",
+      "required_artifact": ["working diff", "commands run", "test evidence", "remaining risks"],
+      "rubric": ["acceptance criteria pass", "diff is scoped", "unrelated files are preserved"]
+    },
+    {
+      "id": "debugger-regression",
+      "role": "debugger",
+      "task": "Reproduce and fix a seeded deterministic regression in a disposable fixture repository.",
+      "required_artifact": ["reproduction", "root cause", "minimal fix", "regression test"],
+      "rubric": ["failure is reproduced before fixing", "causal explanation matches code", "test fails before and passes after"]
+    },
+    {
+      "id": "intent-review",
+      "role": "intent_reviewer",
+      "task": "Review an immutable diff against its original constraints and architecture brief.",
+      "required_artifact": ["spec gaps", "architecture risks", "missing cases", "evidence references"],
+      "rubric": ["findings trace to explicit intent", "no workspace mutation", "uncertainty and severity are separated"]
+    },
+    {
+      "id": "correctness-review",
+      "role": "correctness_reviewer",
+      "task": "Review an immutable diff containing seeded correctness and regression risks.",
+      "required_artifact": ["severity", "file and line", "rationale", "verification suggestion"],
+      "rubric": ["seeded defects are identified", "false positives are bounded", "findings are independently verifiable"]
+    }
+  ]
+}

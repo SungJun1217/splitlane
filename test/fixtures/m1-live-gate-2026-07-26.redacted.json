@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-26",
+  "explicit_user_consent": true,
+  "total_provider_turns_started_across_runs": 40,
+  "provider_turns_started": 20,
+  "completed_compare_pairs": 10,
+  "all_lane_statuses_completed": true,
+  "expected_markers_observed": true,
+  "provider_sessions_stable": true,
+  "cross_provider_event_rejected": false,
+  "workspace_unchanged": true,
+  "shutdown": {
+    "initial_detector_grace_ms": 500,
+    "claude_sdk_child_present_at_cutoff": true,
+    "child_present_in_follow_up_process_audit": false,
+    "corrective_change": "explicit Query.close on completion, interruption, and adapter shutdown",
+    "post_fix_live_rerun_completed": true,
+    "post_fix_lingering_processes": 0
+  },
+  "gate_status": "passed",
+  "session_ids_retained": false,
+  "account_data_retained": false
+}

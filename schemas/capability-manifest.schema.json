@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://splitlane.local/schemas/capability-manifest.schema.json",
+  "title": "Splitlane runtime capability descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "provider",
+    "label",
+    "stability",
+    "availability",
+    "transport",
+    "requirements",
+    "input_schema",
+    "safety_effect",
+    "session_effect",
+    "conflicts"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "provider": { "enum": ["claude", "codex"] },
+    "label": { "type": "string", "minLength": 1 },
+    "stability": { "enum": ["stable", "preview", "experimental"] },
+    "availability": { "enum": ["available", "unavailable", "blocked"] },
+    "transport": { "type": "string", "minLength": 1 },
+    "requirements": { "type": "array", "items": { "type": "string" } },
+    "input_schema": { "type": "object" },
+    "safety_effect": { "type": "string" },
+    "session_effect": { "type": "string" },
+    "conflicts": { "type": "array", "items": { "type": "string" } }
+  }
+}
