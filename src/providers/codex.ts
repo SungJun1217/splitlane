@@ -27,6 +27,8 @@ interface ThreadStartResponse {
   modelProvider: string;
 }
 
+type ThreadResumeResponse = ThreadStartResponse;
+
 interface TurnStartResponse {
   turn: { id: string };
 }
@@ -241,9 +243,29 @@ export class CodexAdapter implements ProviderAdapter {
       cwd: options.projectRoot,
       sandbox: "read-only",
       approvalPolicy: "untrusted",
-      ephemeral: true,
+      ephemeral: false,
       ...model,
     });
+    return {
+      provider: this.provider,
+      id: response.thread.id,
+      requestedModel: options.requestedModel,
+      effectiveModel: sanitizeIdentifier(response.model) || options.requestedModel,
+    };
+  }
+
+  async resumeSession(sessionId: string, options: SessionOptions): Promise<SessionHandle> {
+    this.#projectRoot = options.projectRoot;
+    const rpc = await this.#ensureRpc();
+    const model = options.requestedModel === "default" ? {} : { model: options.requestedModel };
+    const response = await rpc.request<ThreadResumeResponse>("thread/resume", {
+      threadId: sessionId,
+      cwd: options.projectRoot,
+      sandbox: "read-only",
+      approvalPolicy: "untrusted",
+      ...model,
+    });
+    if (response.thread.id !== sessionId) throw new Error("Codex thread/resume returned a mismatched thread ID.");
     return {
       provider: this.provider,
       id: response.thread.id,

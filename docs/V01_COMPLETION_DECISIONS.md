@@ -232,3 +232,17 @@ or authorize paid live model turns.
   removal, rendering, and shutdown cleanup. Type checking, 74 offline tests,
   macOS/Linux builds, and terminal restoration passed; no provider model turn
   was started.
+
+### 2026-07-26 — Session metadata and restoration
+
+- Added atomic `session-state/v1` records under the user state directory with a
+  SHA-256 project identity, provider/model/version metadata, clean/interrupted
+  state, and restrictive file permissions. Transcripts remain disabled.
+- Added startup Restore, Start new, and Inspect metadata choices, provider-local
+  compatibility failures, direct Claude session and Codex `thread/resume`
+  restoration, and a confirmed focused-lane reset.
+- Restoring never replays prompts or restores workflow mode, writer authority,
+  approvals, queues, or running turns. Reset removes Splitlane metadata only.
+- Type checking, 77 offline tests, macOS/Linux standalone builds, the locally
+  generated Codex resume schema, reset-modal rendering, and terminal restoration
+  passed without credentials or a model turn.

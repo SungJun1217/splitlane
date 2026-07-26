@@ -132,6 +132,12 @@ export class ClaudeAdapter implements ProviderAdapter {
     };
   }
 
+  async resumeSession(sessionId: string, options: SessionOptions): Promise<SessionHandle> {
+    this.#projectRoot = options.projectRoot;
+    if (!sessionId.trim()) throw new Error("Claude resume requires a provider session ID.");
+    return { provider: this.provider, id: sessionId, requestedModel: options.requestedModel, effectiveModel: options.requestedModel };
+  }
+
   async startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {
     if (options.workspaceAccess === "workspace_write") {
       const lease = options.writerLease;

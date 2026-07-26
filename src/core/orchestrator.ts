@@ -18,6 +18,7 @@ import type {
   RoleProfile,
   ReviewMechanism,
   ReviewSnapshot,
+  RestorableSession,
   SessionHandle,
   TurnOptions,
   WriterLease,
@@ -30,6 +31,7 @@ import { captureReviewPatch, createReviewEnvelope, reviewMechanismStability } fr
 import { buildFindingsRelay, buildReviewPrompt, parseReviewFindings } from "../review/findings.ts";
 import { loadFindingPreview } from "../review/preview.ts";
 import { classifyProviderError } from "./provider-error.ts";
+import { SessionStore, type SessionRecord } from "../session/store.ts";
 
 // Visible M1 routing hypotheses only; this is not the approved v0.1 default profile.
 const M1_PREVIEW_ROLES: RoleProfile = {
@@ -72,6 +74,9 @@ export class CompareOrchestrator {
   #lastWriterPrompt: string | null = null;
   #queueScheduling = false;
   readonly #allowPreview: boolean;
+  readonly #sessionStore: SessionStore | null;
+  readonly #providerVersions = new Map<ProviderId, string | null>();
+  readonly #sessionWrites = new Map<ProviderId, Promise<unknown>>();
   #snapshot: AppSnapshot;
 
   constructor(
@@ -82,6 +87,7 @@ export class CompareOrchestrator {
     this.#git = new GitObserver(projectRoot);
     this.#workspace = new WorkspaceGuard(projectRoot);
     this.#allowPreview = config?.capabilities.allowPreview ?? true;
+    this.#sessionStore = config ? new SessionStore(config.stateDirectory, projectRoot) : null;
     this.#snapshot = {
       mode: "compare",
       writer: null,
@@ -107,6 +113,7 @@ export class CompareOrchestrator {
         showTools: config?.ui.showTools ?? "collapsed",
         restoreSessions: config?.ui.restoreSessions ?? "ask",
       },
+      restorableSessions: [],
       diagnostics: [],
       notice: null,
     };
@@ -200,6 +207,23 @@ export class CompareOrchestrator {
     ]);
     const claudeError = claude.available ? null : sanitizeTerminalText(claude.error ?? "Claude unavailable");
     const codexError = codex.available ? null : sanitizeTerminalText(codex.error ?? "Codex unavailable");
+    this.#providerVersions.set("claude", claude.version);
+    this.#providerVersions.set("codex", codex.version);
+    const records = this.#sessionStore
+      ? await Promise.all((["claude", "codex"] as const).map(async (provider) => {
+          try { return await this.#sessionStore!.load(provider); }
+          catch (error) { this.#diagnose(provider, `Session metadata ignored: ${(error as Error).message}`); return null; }
+        }))
+      : [];
+    const restorableSessions = records.filter((record): record is SessionRecord => Boolean(record)).map((record): RestorableSession => ({
+      provider: record.provider,
+      sessionId: record.sessionId,
+      requestedModel: record.requestedModel,
+      effectiveModel: record.effectiveModel,
+      providerVersion: record.providerVersion,
+      updatedAt: record.updatedAt,
+      interrupted: !record.clean,
+    }));
     this.#publish({
       ...this.#snapshot,
       git,
@@ -216,7 +240,68 @@ export class CompareOrchestrator {
           ? this.#snapshot.lanes.codex
           : { ...this.#snapshot.lanes.codex, status: "UNAVAILABLE", error: codexError, errorKind: classifyProviderError(codexError) },
       },
+      restorableSessions: this.#snapshot.configuration.restoreSessions === "never" ? [] : restorableSessions,
     });
+    if (this.#snapshot.configuration.restoreSessions === "always" && restorableSessions.length) await this.restoreSessions();
+  }
+
+  async restoreSessions(): Promise<void> {
+    const records = [...this.#snapshot.restorableSessions];
+    for (const record of records) {
+      const lane = this.#snapshot.lanes[record.provider];
+      const currentVersion = this.#providerVersions.get(record.provider) ?? null;
+      if (lane.status === "UNAVAILABLE") continue;
+      if (record.providerVersion && currentVersion && record.providerVersion !== currentVersion) {
+        this.#diagnose(record.provider, `Session restore refused: provider version changed from ${record.providerVersion} to ${currentVersion}.`);
+        this.#patchLane(record.provider, { error: "Stored session provider version is incompatible.", errorKind: "configuration" });
+        continue;
+      }
+      if (record.requestedModel !== lane.requestedModel) {
+        this.#patchLane(record.provider, { error: `Stored session model ${record.requestedModel} does not match selected model ${lane.requestedModel}.`, errorKind: "invalid_model" });
+        continue;
+      }
+      try {
+        const session = await this.adapters[record.provider].resumeSession(record.sessionId, { projectRoot: this.projectRoot, requestedModel: record.requestedModel });
+        this.#sessions.set(record.provider, session);
+        this.#patchLane(record.provider, { sessionId: session.id, effectiveModel: session.effectiveModel, error: null, errorKind: null });
+      } catch (error) {
+        this.#diagnose(record.provider, `Session restore failed: ${(error as Error).message}`);
+        this.#patchLane(record.provider, { error: sanitizeTerminalText((error as Error).message), errorKind: classifyProviderError(error) });
+      }
+    }
+    this.#patch({ restorableSessions: [], notice: "Session restoration finished independently per provider; no writer authority was restored." });
+  }
+
+  async startNewSessions(): Promise<void> {
+    await Promise.allSettled((["claude", "codex"] as const).map((provider) => this.#removeSessionMetadata(provider)));
+    this.#patch({ restorableSessions: [], notice: "Stored Splitlane session metadata removed; provider-owned history was not modified." });
+  }
+
+  async resetSession(provider: ProviderId): Promise<boolean> {
+    if (!canAccept(this.#snapshot.lanes[provider])) {
+      this.#patch({ notice: `${provider} session cannot reset while its lane is active.` });
+      return false;
+    }
+    this.#sessions.delete(provider);
+    await this.#removeSessionMetadata(provider);
+    this.#patchLane(provider, { sessionId: null, effectiveModel: this.#snapshot.lanes[provider].requestedModel, output: "", activities: [], error: null, errorKind: null });
+    this.#patch({ notice: `${provider} Splitlane session metadata reset; the other lane and provider-owned history are unchanged.` });
+    return true;
+  }
+
+  #persistSession(provider: ProviderId, clean: boolean): void {
+    const session = this.#sessions.get(provider);
+    if (!this.#sessionStore || !session?.id) return;
+    const prior = this.#sessionWrites.get(provider) ?? Promise.resolve();
+    const write = prior.then(() => this.#sessionStore!.save(provider, session, this.#providerVersions.get(provider) ?? null, clean))
+      .catch((error) => this.#diagnose(provider, `Session metadata write failed: ${(error as Error).message}`));
+    this.#sessionWrites.set(provider, write);
+    void write.finally(() => { if (this.#sessionWrites.get(provider) === write) this.#sessionWrites.delete(provider); });
+  }
+
+  async #removeSessionMetadata(provider: ProviderId): Promise<void> {
+    await this.#sessionWrites.get(provider);
+    await this.#sessionStore?.remove(provider);
   }
 
   setTarget(target: PromptTarget): void {
@@ -248,6 +333,7 @@ export class CompareOrchestrator {
       return;
     }
     this.#sessions.delete(provider);
+    void this.#removeSessionMetadata(provider);
     this.#patchLane(provider, {
       requestedModel,
       effectiveModel: requestedModel,
@@ -843,6 +929,7 @@ export class CompareOrchestrator {
           effectiveModel: session.effectiveModel,
         });
       }
+      this.#persistSession(provider, false);
       const lease = this.#snapshot.writerLease;
       const workspaceAccess = this.#snapshot.mode === "build" &&
           this.#snapshot.writer === provider &&
@@ -917,6 +1004,14 @@ export class CompareOrchestrator {
             ? providerEvent.payload.effective_model
             : lane.effectiveModel,
         });
+        if (providerEvent.session_id) {
+          const session = this.#sessions.get(provider);
+          if (session) {
+            session.id = providerEvent.session_id;
+            if (typeof providerEvent.payload.effective_model === "string") session.effectiveModel = providerEvent.payload.effective_model;
+          }
+          this.#persistSession(provider, false);
+        }
         break;
       case "turn.started":
         this.#patchLane(provider, { status: "RUNNING", turnId: providerEvent.turn_id });
@@ -990,12 +1085,14 @@ export class CompareOrchestrator {
         this.#patchLane(provider, { status: "COMPLETED", turnId: null });
         void this.refreshGit();
         if (this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+        this.#persistSession(provider, true);
         break;
       case "turn.cancelled":
         this.#resolveApprovalsFor(provider, "cancel_turn");
         this.#patchLane(provider, { status: "CANCELLED", turnId: null });
         void this.refreshGit();
         if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+        this.#persistSession(provider, true);
         break;
       case "turn.failed":
         this.#resolveApprovalsFor(provider, "cancel_turn");
@@ -1017,6 +1114,7 @@ export class CompareOrchestrator {
         });
         void this.refreshGit();
         if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+        this.#persistSession(provider, true);
         break;
       case "provider.warning":
         this.#diagnose(provider, providerEvent.payload.message ?? "Provider warning");
@@ -1069,6 +1167,11 @@ export class CompareOrchestrator {
     this.#resolveApprovalsFor("claude", "cancel_turn");
     this.#resolveApprovalsFor("codex", "cancel_turn");
     this.#patch({ queue: [], queueOffer: null });
+    for (const provider of ["claude", "codex"] as const) {
+      const active = ["STARTING", "RUNNING", "BLOCKED", "CANCELLING"].includes(this.#snapshot.lanes[provider].status);
+      this.#persistSession(provider, !active);
+    }
+    await Promise.allSettled([...this.#sessionWrites.values()]);
     await Promise.allSettled(Object.values(this.adapters).map((adapter) => adapter.close()));
     if (this.#snapshot.writer) this.#completeRevocation(this.#snapshot.writer);
   }

@@ -1,0 +1,24 @@
+{
+  "captured_at": "2026-07-26",
+  "source": "local codex app-server generate-json-schema and fake transport",
+  "redacted": true,
+  "model_turn_started": false,
+  "request": {
+    "method": "thread/resume",
+    "params": {
+      "threadId": "<provider-thread-id>",
+      "cwd": "<project-root>",
+      "sandbox": "read-only",
+      "approvalPolicy": "untrusted"
+    }
+  },
+  "response_shape": {
+    "thread": { "id": "<provider-thread-id>" },
+    "model": "<provider-model-id>",
+    "modelProvider": "<provider-name>"
+  },
+  "notes": [
+    "No prompt or turn/start request was sent.",
+    "A mismatched response thread ID is rejected."
+  ]
+}

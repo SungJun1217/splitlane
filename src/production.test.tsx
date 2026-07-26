@@ -34,6 +34,7 @@ import { captureReviewPatch, createReviewEnvelope, REVIEW_PATCH_LIMIT } from "./
 import { FINDINGS_END, FINDINGS_START, parseReviewFindings } from "./review/findings.ts";
 import { loadFindingPreview } from "./review/preview.ts";
 import { configPaths, discoverProjectRoot, loadConfig, parseConfig } from "./config/config.ts";
+import { SessionStore, projectIdentity } from "./session/store.ts";
 
 type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
 
@@ -44,6 +45,7 @@ class FakeAdapter implements ProviderAdapter {
   readonly turnOptions: TurnOptions[] = [];
   readonly approvalDecisions: ApprovalDecision[] = [];
   readonly nativeReviewPrompts: string[] = [];
+  readonly resumed: string[] = [];
   readonly reviewMechanisms?: readonly ("claude_generic" | "codex_generic" | "codex_native")[];
   readonly #active = new Map<string, AsyncQueue<NormalizedEvent>>();
 
@@ -63,6 +65,12 @@ class FakeAdapter implements ProviderAdapter {
       requestedModel: options.requestedModel,
       effectiveModel: options.requestedModel,
     };
+  }
+
+  async resumeSession(sessionId: string, options: SessionOptions): Promise<SessionHandle> {
+    this.sessions.push(options);
+    this.resumed.push(sessionId);
+    return { provider: this.provider, id: sessionId, requestedModel: options.requestedModel, effectiveModel: options.requestedModel };
   }
 
   async startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {
@@ -537,6 +545,56 @@ describe("configuration", () => {
   });
 });
 
+describe("session metadata", () => {
+  test("restores providers independently without replay and resets one lane only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-session-"));
+    try {
+      const config = await loadConfig(root, { platform: "linux", home: join(root, "home"), env: {} });
+      const store = new SessionStore(config.stateDirectory, root);
+      await store.save("claude", { provider: "claude", id: "claude-restored", requestedModel: "default", effectiveModel: "default" }, "fake/1", false);
+      await store.save("codex", { provider: "codex", id: "codex-restored", requestedModel: "default", effectiveModel: "default" }, "fake/1", true);
+      const claude = new FakeAdapter("claude");
+      const codex = new FakeAdapter("codex");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex }, config);
+      await orchestrator.initialize();
+      expect(orchestrator.getSnapshot().restorableSessions).toHaveLength(2);
+      expect(orchestrator.getSnapshot().restorableSessions.find((item) => item.provider === "claude")?.interrupted).toBe(true);
+      await orchestrator.restoreSessions();
+      expect(claude.resumed).toEqual(["claude-restored"]);
+      expect(codex.resumed).toEqual(["codex-restored"]);
+      expect(claude.prompts).toHaveLength(0);
+      expect(orchestrator.getSnapshot().writer).toBeNull();
+      expect(await orchestrator.resetSession("claude")).toBe(true);
+      expect(await store.load("claude")).toBeNull();
+      expect((await store.load("codex"))?.sessionId).toBe("codex-restored");
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("writes atomic metadata with a hashed project identity and clean completion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-session-write-"));
+    try {
+      const config = await loadConfig(root, { platform: "linux", home: join(root, "home"), env: {} });
+      const claude = new FakeAdapter("claude", "complete");
+      const codex = new FakeAdapter("codex", "complete");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex }, config);
+      await orchestrator.initialize();
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("persist metadata only");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+      await orchestrator.close();
+      const record = await new SessionStore(config.stateDirectory, root).load("claude");
+      expect(record).toMatchObject({ schemaVersion: "session-state/v1", provider: "claude", sessionId: "claude-session", clean: true });
+      expect(record?.projectId).toBe(projectIdentity(root));
+      expect(JSON.stringify(record)).not.toContain(root);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("terminal rendering", () => {
   test("sanitizes terminal escape injection and bounds output", () => {
     expect(sanitizeTerminalText("ok\u001b]2;owned\u0007\u001b[31m!\u001b[0m")).toBe("ok!");
@@ -638,6 +696,14 @@ describe("terminal rendering", () => {
     );
     expect(configuration).toContain("STRICT JSON");
     expect(configuration).toContain(".splitlane/config.json");
+
+    const restore = renderToString(
+      <SplitlaneView snapshot={{ ...snapshot, restorableSessions: [{ provider: "claude", sessionId: "opaque-session", requestedModel: "default", effectiveModel: "default", providerVersion: "fake/1", updatedAt: new Date(0).toISOString(), interrupted: true }] }} prompt="" columns={90} rows={30} overlay="restore" restoreInspect destructiveConfirm />,
+      { columns: 90 },
+    );
+    expect(restore).toContain("METADATA ONLY · NO AUTHORITY");
+    expect(restore).toContain("INTERRUPTED");
+    expect(restore).toContain("Press R again");
   });
 
   test("renders writer confirmation and approval safety details", () => {
@@ -1084,6 +1150,15 @@ describe("M3 reviewer handoff", () => {
 });
 
 describe("captured provider event compatibility", () => {
+  test("captured Codex resume contract is read-only and starts no model turn", async () => {
+    const fixture = await Bun.file("test/fixtures/codex-thread-resume.redacted.json").json() as {
+      model_turn_started: boolean;
+      request: { method: string; params: Record<string, unknown> };
+    };
+    expect(fixture.model_turn_started).toBe(false);
+    expect(fixture.request).toMatchObject({ method: "thread/resume", params: { sandbox: "read-only", approvalPolicy: "untrusted" } });
+    expect(fixture.request.params).not.toHaveProperty("prompt");
+  });
   test("normalizes Claude session, streaming, tools, failures, and malformed events", async () => {
     const fixture = await Bun.file("test/fixtures/claude-sdk-stream.redacted.json").json() as {
       events: unknown[];
@@ -1245,6 +1320,8 @@ describe("captured provider event compatibility", () => {
       ),
     });
     const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    const resumed = await adapter.resumeSession(session.id, { projectRoot: process.cwd(), requestedModel: "default" });
+    expect(resumed).toMatchObject({ id: "fake-thread", effectiveModel: "fake-model" });
     expect(adapter.reviewMechanisms).toEqual(["codex_native", "codex_generic"]);
     const turn = await adapter.startReview(session, "review envelope", readOnlyTurnOptions());
     const events: NormalizedEvent[] = [];

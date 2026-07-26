@@ -6,7 +6,7 @@ import { providerErrorAction } from "../core/provider-error.ts";
 import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
 import { lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -98,7 +98,7 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
   );
 }
 
-function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex }: {
+function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex, restoreInspect, destructiveConfirm }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
   modelProvider: ProviderId;
@@ -113,6 +113,8 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   activityIndex: number;
   activityExpanded: boolean;
   queueIndex: number;
+  restoreInspect: boolean;
+  destructiveConfirm: boolean;
 }) {
   if (overlay === "model") {
     return (
@@ -248,7 +250,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics · Ctrl+K queue</Text>
         <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings</Text>
         <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
-        <Text>Lifecycle: Ctrl+Q closes transports and exits · Esc closes a modal</Text>
+        <Text>Lifecycle: Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
         <Text dimColor>Ctrl+G/Esc close</Text>
       </Box>
@@ -298,6 +300,29 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
       </Box>
     );
   }
+  if (overlay === "restore") {
+    return (
+      <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
+        <Text bold>RESTORE PROVIDER SESSIONS · METADATA ONLY · NO AUTHORITY</Text>
+        {snapshot.restorableSessions.map((record) => <Text key={record.provider} color={record.interrupted ? "yellow" : "white"}>
+          {record.provider.toUpperCase()} · {record.requestedModel} · {record.interrupted ? "INTERRUPTED" : "CLEAN"}{restoreInspect ? ` · ${record.sessionId.slice(0, 12)} · ${record.updatedAt}` : ""}
+        </Text>)}
+        <Text color="yellow">{destructiveConfirm ? "Press R again to restore independently. Writer, queue, approvals, and mode stay reset." : "R restore · N start new · I inspect metadata"}</Text>
+        <Text dimColor>Restore uses provider IDs; prompts and transcripts are never replayed.</Text>
+      </Box>
+    );
+  }
+  if (overlay === "reset_session") {
+    const lane = snapshot.lanes[snapshot.focusedProvider];
+    return (
+      <Box borderStyle="double" borderColor="red" flexDirection="column" paddingX={1}>
+        <Text bold>RESET {lane.provider.toUpperCase()} SPLITLANE SESSION</Text>
+        <Text>session: {lane.sessionId?.slice(0, 12) ?? "new"} · model {lane.requestedModel}</Text>
+        <Text>The other lane and provider-owned history are unchanged.</Text>
+        <Text color="yellow">{destructiveConfirm ? "Press R again to remove this lane's metadata." : "R review confirmation · Esc close"}</Text>
+      </Box>
+    );
+  }
   return (
     <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
       <Text bold>ACTION PALETTE · capability aware</Text>
@@ -309,7 +334,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0 }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0, restoreInspect = false, destructiveConfirm = false }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
@@ -328,6 +353,8 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   activityIndex?: number;
   activityExpanded?: boolean;
   queueIndex?: number;
+  restoreInspect?: boolean;
+  destructiveConfirm?: boolean;
 }) {
   const layout = selectLayout(columns);
   const height = contentHeight(rows);
@@ -347,7 +374,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
         <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} /> : (
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
         <Box flexDirection={outerDirection} gap={1}>
           <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
             {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} scrollOffset={scrollOffsets[provider]} />)}
@@ -385,6 +412,8 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   const [activityIndex, setActivityIndex] = useState(0);
   const [activityExpanded, setActivityExpanded] = useState(snapshot.configuration.showTools === "expanded");
   const [queueIndex, setQueueIndex] = useState(0);
+  const [restoreInspect, setRestoreInspect] = useState(false);
+  const [destructiveConfirm, setDestructiveConfirm] = useState(false);
 
   useEffect(() => {
     const counts: Record<ProviderId, number> = {
@@ -419,6 +448,10 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   }, [snapshot.queueOffer]);
 
   useEffect(() => {
+    if (snapshot.restorableSessions.length) setOverlay("restore");
+  }, [snapshot.restorableSessions.length]);
+
+  useEffect(() => {
     if (snapshot.mode === "review" && snapshot.review && snapshot.review.status !== "running") {
       setFindingIndex(0);
       setStaleAcknowledged(false);
@@ -437,6 +470,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       if (overlay === "queue_offer") orchestrator.cancelQueueOffer();
       setOverlay(null);
       setWriterConfirm(false);
+      setDestructiveConfirm(false);
       return;
     }
     if (overlay === "help") {
@@ -474,6 +508,18 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     }
     if (overlay === "configuration") {
       if (key.ctrl && input === "u") setOverlay(null);
+      return;
+    }
+    if (overlay === "restore") {
+      if (input.toLowerCase() === "i") setRestoreInspect((value) => !value);
+      else if (input.toLowerCase() === "n") void orchestrator.startNewSessions().then(() => setOverlay(null));
+      else if (input.toLowerCase() === "r" && !destructiveConfirm) setDestructiveConfirm(true);
+      else if (input.toLowerCase() === "r") void orchestrator.restoreSessions().then(() => { setOverlay(null); setDestructiveConfirm(false); });
+      return;
+    }
+    if (overlay === "reset_session") {
+      if (input.toLowerCase() === "r" && !destructiveConfirm) setDestructiveConfirm(true);
+      else if (input.toLowerCase() === "r") void orchestrator.resetSession(snapshot.focusedProvider).then((reset) => { if (reset) setOverlay(null); setDestructiveConfirm(false); });
       return;
     }
     if (overlay === "model") {
@@ -640,6 +686,10 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       setOverlay("queue");
     }
     else if (key.ctrl && input === "u") setOverlay("configuration");
+    else if (key.ctrl && input === "n") {
+      setDestructiveConfirm(false);
+      setOverlay("reset_session");
+    }
     else if (key.ctrl && input === "d") setOverlay("diagnostics");
     else if (key.ctrl && input === "o") {
       setRoleProvider(snapshot.roles[ROLE_IDS[roleIndex] ?? "scout"]);
@@ -650,5 +700,5 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} />;
 }

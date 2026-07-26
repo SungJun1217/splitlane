@@ -15,6 +15,7 @@ export interface EffectiveConfig {
   capabilities: { allowPreview: boolean };
   paths: { user: string; project: string };
   loaded: { user: boolean; project: boolean };
+  stateDirectory: string;
 }
 
 interface ConfigFile {
@@ -141,6 +142,15 @@ export function configPaths(projectRoot: string, options: { platform?: NodeJS.Pl
   return { user, project: join(resolve(projectRoot), ".splitlane", "config.json") };
 }
 
+export function stateDirectory(options: { platform?: NodeJS.Platform; home?: string; env?: NodeJS.ProcessEnv } = {}): string {
+  const platform = options.platform ?? process.platform;
+  const home = options.home ?? homedir();
+  const env = options.env ?? process.env;
+  return platform === "darwin"
+    ? join(home, "Library", "Application Support", "Splitlane", "state")
+    : join(env.XDG_STATE_HOME || join(home, ".local", "state"), "splitlane");
+}
+
 export async function discoverProjectRoot(start: string): Promise<string> {
   let current = resolve(start);
   while (true) {
@@ -175,5 +185,6 @@ export async function loadConfig(projectRoot: string, options: { platform?: Node
     capabilities: { allowPreview: project?.capabilities?.allow_preview ?? user?.capabilities?.allow_preview ?? true },
     paths,
     loaded: { user: user !== null, project: project !== null },
+    stateDirectory: stateDirectory(options),
   };
 }

@@ -76,6 +76,15 @@ Unknown keys and invalid values stop startup with an exact configuration path.
 Configuration cannot contain credentials, session IDs, writer leases, or
 persistent approvals because those keys are not part of the schema.
 
+Session continuity stores metadata only under the platform user-state directory
+(`~/Library/Application Support/Splitlane/state` on macOS or
+`${XDG_STATE_HOME:-~/.local/state}/splitlane` on Linux). On startup, the default
+`ask` policy offers Restore, Start new, and metadata inspection. Restore uses the
+provider's opaque session/thread ID and never replays prompts; it restores no
+writer lease, approval, queue, or workflow mode. `Ctrl+N` resets only the focused
+lane's Splitlane metadata after confirmation and leaves provider-owned history
+untouched.
+
 Each lane has an independent line viewport. `Page Up` and `Page Down` scroll the
 focused lane, `Home` jumps to its oldest retained output, and `End` resumes
 follow-tail mode. New output preserves a manually scrolled position. `Ctrl+T`

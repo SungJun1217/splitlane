@@ -115,6 +115,7 @@ export interface ProviderAdapter {
   readonly reviewMechanisms?: readonly ReviewMechanism[];
   probe(): Promise<ProviderProbe>;
   startSession(options: SessionOptions): Promise<SessionHandle>;
+  resumeSession(sessionId: string, options: SessionOptions): Promise<SessionHandle>;
   startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn>;
   startReview?(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn>;
   interrupt(turnId: string): Promise<void>;
@@ -188,6 +189,16 @@ export interface ConfigurationSnapshot {
   allowPreview: boolean;
   showTools: "collapsed" | "expanded";
   restoreSessions: "ask" | "always" | "never";
+}
+
+export interface RestorableSession {
+  provider: ProviderId;
+  sessionId: string;
+  requestedModel: string;
+  effectiveModel: string;
+  providerVersion: string | null;
+  updatedAt: string;
+  interrupted: boolean;
 }
 
 export interface GitSnapshot {
@@ -297,6 +308,7 @@ export interface AppSnapshot {
   queueOffer: QueueItem | null;
   queueLimit: number;
   configuration: ConfigurationSnapshot;
+  restorableSessions: readonly RestorableSession[];
   diagnostics: readonly string[];
   notice: string | null;
 }

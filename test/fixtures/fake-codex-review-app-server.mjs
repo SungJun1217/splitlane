@@ -19,8 +19,16 @@ lines.on("line", (line) => {
     return;
   }
   if (message.method === "thread/start") {
-    if (message.params?.sandbox !== "read-only" || message.params?.approvalPolicy !== "untrusted") {
+    if (message.params?.sandbox !== "read-only" || message.params?.approvalPolicy !== "untrusted" || message.params?.ephemeral !== false) {
       send({ id: message.id, error: { code: -32602, message: "thread must be read-only" } });
+      return;
+    }
+    send({ id: message.id, result: { thread: { id: "fake-thread" }, model: "fake-model", modelProvider: "fake" } });
+    return;
+  }
+  if (message.method === "thread/resume") {
+    if (message.params?.threadId !== "fake-thread" || message.params?.sandbox !== "read-only" || message.params?.approvalPolicy !== "untrusted") {
+      send({ id: message.id, error: { code: -32602, message: "malformed thread/resume" } });
       return;
     }
     send({ id: message.id, result: { thread: { id: "fake-thread" }, model: "fake-model", modelProvider: "fake" } });
