@@ -51,6 +51,13 @@ lane-local cancellation, `Ctrl+V` to prepare a review handoff, `Ctrl+F` for
 review findings, `Ctrl+I` for the read-only Git inspector, and `Ctrl+Q` to close
 provider transports and exit.
 
+Each lane has an independent line viewport. `Page Up` and `Page Down` scroll the
+focused lane, `Home` jumps to its oldest retained output, and `End` resumes
+follow-tail mode. New output preserves a manually scrolled position. `Ctrl+T`
+opens the focused lane's bounded activity log, where tool, file, approval,
+warning, and failure entries can be selected and expanded with `Space`.
+`Ctrl+G` opens the in-product keyboard help.
+
 Build mode never changes the prompt target automatically. When the target is
 `both`, the selected writer receives workspace-write access while the peer gets
 the same prompt read-only. Approval choices are limited to allow once, deny, and

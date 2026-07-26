@@ -8,6 +8,7 @@ import stringWidth from "string-width";
 import { CompareOrchestrator } from "./core/orchestrator.ts";
 import { AsyncQueue } from "./core/async-queue.ts";
 import { event } from "./core/events.ts";
+import { classifyProviderError, providerErrorAction } from "./core/provider-error.ts";
 import type {
   ApprovalDecision,
   AppSnapshot,
@@ -26,14 +27,14 @@ import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCo
 import { CodexRpcClient } from "./providers/codex-rpc.ts";
 import { GitObserver, parseStatus } from "./git/observer.ts";
 import { SplitlaneView } from "./ui/app.tsx";
-import { selectLayout } from "./ui/layout.ts";
-import { removeLastGrapheme } from "./ui/text.ts";
+import { laneOutputHeight, selectLayout } from "./ui/layout.ts";
+import { removeLastGrapheme, scrollWindow } from "./ui/text.ts";
 import { WorkspaceGuard, isPathInsideWorkspace } from "./workspace/guard.ts";
 import { captureReviewPatch, createReviewEnvelope, REVIEW_PATCH_LIMIT } from "./review/envelope.ts";
 import { FINDINGS_END, FINDINGS_START, parseReviewFindings } from "./review/findings.ts";
 import { loadFindingPreview } from "./review/preview.ts";
 
-type Scenario = "complete" | "fail" | "hold" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
+type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
 
 class FakeAdapter implements ProviderAdapter {
   readonly sessions: SessionOptions[] = [];
@@ -90,7 +91,28 @@ class FakeAdapter implements ProviderAdapter {
         turnId: id,
         payload: { text: ["review_findings", "review_delayed"].includes(this.scenario) ? reviewOutput : `${this.provider}:한글` },
       }));
-      if (this.scenario === "fail") {
+      if (this.scenario === "activity" || this.scenario === "activity_burst") {
+        const activityCount = this.scenario === "activity_burst" ? 105 : 1;
+        for (let index = 0; index < activityCount; index += 1) {
+          queue.push(event(this.provider, "tool.started", {
+            sessionId: session.id,
+            turnId: id,
+            payload: { tool: `한글 검사 ${index + 1}`, command: "bun test" },
+          }));
+          queue.push(event(this.provider, "tool.completed", {
+            sessionId: session.id,
+            turnId: id,
+            payload: { tool: `한글 검사 ${index + 1}` },
+          }));
+        }
+        queue.push(event(this.provider, "file.changed", {
+          sessionId: session.id,
+          turnId: id,
+          payload: { path: "src/한글.ts" },
+        }));
+        queue.push(event(this.provider, "turn.completed", { sessionId: session.id, turnId: id }));
+        queue.close();
+      } else if (this.scenario === "fail") {
         queue.push(event(this.provider, "turn.failed", { sessionId: session.id, turnId: id, payload: { error: "fake failure" } }));
         queue.close();
       } else if (this.scenario === "complete" || this.scenario === "review_findings") {
@@ -390,6 +412,29 @@ describe("production orchestrator", () => {
     expect(codex.interrupted).toHaveLength(0);
     await orchestrator.close();
   });
+
+  test("retains bounded structured tool and file activity per lane", async () => {
+    const { orchestrator } = setup("activity", "complete");
+    await orchestrator.initialize();
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("record structured activity");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(orchestrator.getSnapshot().lanes.claude.activities).toMatchObject([
+      { kind: "tool", status: "completed", title: "한글 검사 1", detail: "bun test" },
+      { kind: "file", status: "completed", detail: "src/한글.ts" },
+    ]);
+    expect(orchestrator.getSnapshot().lanes.codex.activities).toHaveLength(0);
+    await orchestrator.close();
+
+    const burst = setup("activity_burst", "complete").orchestrator;
+    await burst.initialize();
+    burst.setTarget("claude");
+    await burst.dispatch("bound the activity log");
+    await waitFor(() => burst.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(burst.getSnapshot().lanes.claude.activities).toHaveLength(100);
+    expect(burst.getSnapshot().lanes.claude.activities.at(-1)).toMatchObject({ kind: "file", detail: "src/한글.ts" });
+    await burst.close();
+  });
 });
 
 describe("terminal rendering", () => {
@@ -404,6 +449,12 @@ describe("terminal rendering", () => {
     expect(selectLayout(180)).toBe("columns");
     expect(stringWidth("한글")).toBe(4);
     expect(removeLastGrapheme("A👨‍👩‍👧‍👦한")).toBe("A👨‍👩‍👧‍👦");
+    expect(laneOutputHeight(90, 30, true)).toBeGreaterThanOrEqual(2);
+    expect(scrollWindow("1\n2\n3\n4\n5", 2, 0)).toMatchObject({ content: "4\n5", offset: 0, maxOffset: 3 });
+    expect(scrollWindow("1\n2\n3\n4\n5", 2, 2)).toMatchObject({ content: "2\n3", offset: 2, maxOffset: 3 });
+    expect(classifyProviderError("authentication token expired")).toBe("authentication");
+    expect(classifyProviderError("invalid model foo")).toBe("invalid_model");
+    expect(providerErrorAction("protocol")).toContain("diagnostics");
     expect(parseStatus("## No commits yet on main\n?? 한글.txt\n M src/a.ts\n")).toEqual({
       branch: "main",
       files: ["한글.txt", "src/a.ts"],
@@ -417,14 +468,45 @@ describe("terminal rendering", () => {
       ...base,
       lanes: {
         ...base.lanes,
-        claude: { ...base.lanes.claude, output: "안녕하세요", status: "RUNNING" },
+        claude: {
+          ...base.lanes.claude,
+          output: Array.from({ length: 20 }, (_, index) => `${index + 1}번째 줄 · 안녕하세요`).join("\n"),
+          status: "RUNNING",
+          activities: [{
+            id: "activity-ko",
+            kind: "tool",
+            status: "completed",
+            title: "한글 검사",
+            detail: "bun test -- 한글",
+            safetyEffect: "read-only",
+            timestamp: new Date(0).toISOString(),
+            completedAt: new Date(1).toISOString(),
+            durationMs: 1,
+          }],
+        },
       },
     };
-    const output = renderToString(<SplitlaneView snapshot={snapshot} prompt="변경점을 비교해줘" columns={90} rows={30} />, { columns: 90 });
+    const output = renderToString(<SplitlaneView snapshot={snapshot} prompt="변경점을 비교해줘" columns={90} rows={30} scrollOffsets={{ claude: 1, codex: 0 }} />, { columns: 90 });
     expect(output).toContain("SPLITLANE");
-    expect(output).toContain("안녕하세요");
+    expect(output).toContain("SCROLLED");
+    expect(output).toContain("한글 검사");
     expect(output).toContain("COMPARE");
     expect(output).toContain("writer NONE");
+    expect(output).not.toContain("CODEX");
+
+    const activity = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={90} rows={30} overlay="activity" activityExpanded />,
+      { columns: 90 },
+    );
+    expect(activity).toContain("ACTIVITY · SANITIZED + BOUNDED");
+    expect(activity).toContain("bun test -- 한글");
+    expect(activity).toContain("safety: read-only");
+
+    const help = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={90} rows={30} overlay="help" />,
+      { columns: 90 },
+    );
+    expect(help).toContain("PgUp/PgDn scroll");
   });
 
   test("renders writer confirmation and approval safety details", () => {

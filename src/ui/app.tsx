@@ -1,11 +1,12 @@
-import React, { useEffect, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { AppSnapshot, LaneSnapshot, ProviderId, RoleId } from "../domain.ts";
 import type { CompareOrchestrator } from "../core/orchestrator.ts";
-import { contentHeight, selectLayout } from "./layout.ts";
-import { removeLastGrapheme, tailLines } from "./text.ts";
+import { providerErrorAction } from "../core/provider-error.ts";
+import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
+import { lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -37,8 +38,10 @@ function statusColor(status: LaneSnapshot["status"]): string {
   return "gray";
 }
 
-function Lane({ lane, focused, height }: { lane: LaneSnapshot; focused: boolean; height: number }) {
-  const output = lane.output || (lane.error ? "" : "No output yet.");
+function Lane({ lane, focused, height, scrollOffset }: { lane: LaneSnapshot; focused: boolean; height: number; scrollOffset: number }) {
+  const latestActivity = lane.activities.at(-1);
+  const outputHeight = Math.max(2, height - 5 - (lane.error ? 2 : 0));
+  const viewport = scrollWindow(lane.output || (lane.error ? "" : "No output yet."), outputHeight, scrollOffset);
   return (
     <Box borderStyle={focused ? "double" : "round"} borderColor={focused ? "cyan" : "gray"} flexDirection="column" paddingX={1} height={height} flexGrow={1}>
       <Box justifyContent="space-between">
@@ -46,9 +49,12 @@ function Lane({ lane, focused, height }: { lane: LaneSnapshot; focused: boolean;
         <Text color={statusColor(lane.status)}>{lane.status}</Text>
       </Box>
       <Text dimColor>model: {lane.effectiveModel}  session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}</Text>
-      {lane.toolSummary ? <Text color="yellow">{lane.toolSummary}</Text> : null}
-      <Text wrap="wrap">{tailLines(output, Math.max(2, height - 5))}</Text>
-      {lane.error ? <Text color="red">{tailLines(lane.error, 2)}</Text> : null}
+      <Text color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
+        {latestActivity ? `${latestActivity.kind} · ${latestActivity.status} · ${latestActivity.title}` : "activity · none"}
+        {viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : " · FOLLOW TAIL"}
+      </Text>
+      <Text wrap="wrap">{viewport.content}</Text>
+      {lane.error ? <Text color="red">[{lane.errorKind?.toUpperCase() ?? "UNKNOWN"}] {tailLines(lane.error, 1)}{"\n"}{providerErrorAction(lane.errorKind ?? "unknown")}</Text> : null}
     </Box>
   );
 }
@@ -92,7 +98,7 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
   );
 }
 
-function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged }: {
+function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
   modelProvider: ProviderId;
@@ -104,6 +110,8 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   reviewCriteria: string;
   findingIndex: number;
   staleAcknowledged: boolean;
+  activityIndex: number;
+  activityExpanded: boolean;
 }) {
   if (overlay === "model") {
     return (
@@ -159,10 +167,13 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         {approval ? (
           <>
             <Text>{approval.provider.toUpperCase()} · {approval.tool}</Text>
+            <Text>kind/request: {approval.kind} · {approval.providerRequestId}</Text>
             <Text>command: {approval.command ?? "n/a"}</Text>
-            <Text>cwd/path: {approval.paths.length ? approval.paths.join(", ") : approval.path ?? approval.cwd ?? "unknown"}</Text>
+            <Text>cwd: {approval.cwd ?? "unknown"}</Text>
+            <Text>paths: {approval.paths.length ? approval.paths.join(", ") : approval.path ?? "unknown"}</Text>
             <Text>reason: {approval.reason ?? "not provided"}</Text>
             <Text color={approval.outsideWorkspace ? "red" : "gray"}>boundary: {approval.outsideWorkspace ? "OUTSIDE WORKSPACE" : "inside/unknown"} · network {approval.networkEffect}</Text>
+            <Text color="yellow">effect: one temporary decision · no persistent rule · no permission bypass</Text>
             <Text dimColor>↑/↓ request · A allow once · D deny · X cancel turn · Esc close</Text>
           </>
         ) : <Text>No pending approvals. Esc close.</Text>}
@@ -203,6 +214,45 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
       </Box>
     );
   }
+  if (overlay === "activity") {
+    const lane = snapshot.lanes[snapshot.focusedProvider];
+    const activity = lane.activities[activityIndex] ?? lane.activities.at(-1);
+    const start = Math.max(0, Math.min(activityIndex - 3, Math.max(0, lane.activities.length - 7)));
+    return (
+      <Box borderStyle="double" borderColor="cyan" flexDirection="column" paddingX={1}>
+        <Text bold>{lane.provider.toUpperCase()} ACTIVITY · SANITIZED + BOUNDED · {lane.activities.length}</Text>
+        {lane.activities.length ? lane.activities.slice(start, start + 7).map((item, offset) => {
+          const index = start + offset;
+          return <Text key={item.id} color={index === activityIndex ? "cyan" : item.status === "failed" ? "red" : "white"}>
+            {index === activityIndex ? ">" : " "} {item.kind} · {item.status} · {item.title}
+          </Text>;
+        }) : <Text>No tool, file, approval, warning, or failure activity yet.</Text>}
+        {activity && activityExpanded ? (
+          <Box borderStyle="single" borderColor="gray" flexDirection="column" paddingX={1}>
+            <Text>{activity.detail ?? "No provider detail."}</Text>
+            {activity.safetyEffect ? <Text color="yellow">safety: {activity.safetyEffect}</Text> : null}
+            <Text dimColor>{activity.timestamp}{activity.durationMs !== null ? ` · ${activity.durationMs} ms` : " · running"}</Text>
+          </Box>
+        ) : null}
+        <Text dimColor>↑/↓ select · Space expand/collapse · Ctrl+T/Esc close</Text>
+      </Box>
+    );
+  }
+  if (overlay === "help") {
+    return (
+      <Box borderStyle="double" borderColor="green" flexDirection="column" paddingX={1}>
+        <Text bold>HELP · CURRENT ACTIONS ARE ALWAYS VISIBLE</Text>
+        <Text>Prompt: Enter send · Ctrl+R target · Option+1/2 focus</Text>
+        <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
+        <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics</Text>
+        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings</Text>
+        <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities</Text>
+        <Text>Lifecycle: Ctrl+Q closes transports and exits · Esc closes a modal</Text>
+        <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
+        <Text dimColor>Ctrl+G/Esc close</Text>
+      </Box>
+    );
+  }
   return (
     <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
       <Text bold>ACTION PALETTE · capability aware</Text>
@@ -214,7 +264,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
@@ -229,6 +279,9 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   reviewCriteria?: string;
   findingIndex?: number;
   staleAcknowledged?: boolean;
+  scrollOffsets?: Record<ProviderId, number>;
+  activityIndex?: number;
+  activityExpanded?: boolean;
 }) {
   const layout = selectLayout(columns);
   const height = contentHeight(rows);
@@ -238,17 +291,20 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   const laneHeight = layout === "stacked" ? Math.max(5, Math.floor(height / 2)) : height;
   const focusedLaneHeight = snapshot.inspectorVisible ? Math.max(6, Math.floor(height * 0.65)) : height;
   const roleSummary = ROLE_IDS.map((role) => `${role.replace("_reviewer", "-rev")}:${snapshot.roles[role] === "claude" ? "C" : "X"}`).join(" · ");
+  const footer = layout === "focused"
+    ? "PgUp/PgDn scroll · End tail · ^G help · ^T activity · ⌥1/2 focus · ^Q quit"
+    : "Enter send · PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^R target · ^B build · ^V review · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^Q quit";
   return (
     <Box flexDirection="column">
       <Box justifyContent="space-between">
-        <Text bold color="cyan">SPLITLANE</Text>
+        <Text bold color="cyan">SPLITLANE · {layout.toUpperCase()}</Text>
         <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} /> : (
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} /> : (
         <Box flexDirection={outerDirection} gap={1}>
           <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
-            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} />)}
+            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} scrollOffset={scrollOffsets[provider]} />)}
           </Box>
           {snapshot.inspectorVisible ? <Inspector snapshot={snapshot} height={layout === "focused" ? Math.max(5, height - focusedLaneHeight) : height} /> : null}
         </Box>
@@ -257,7 +313,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
         <Text color="cyan">› </Text><Text>{prompt || "Type a prompt…"}</Text>
       </Box>
       {snapshot.notice ? <Text color="yellow">{snapshot.notice}</Text> : null}
-      <Text dimColor>Enter send · ^R target · ^B build · ^V review · ^F findings · ^W revoke · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^M model · ^P actions · ^O roles · ^D diagnostics · ^Q quit</Text>
+      <Text dimColor>{footer}</Text>
     </Box>
   );
 }
@@ -278,6 +334,30 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   const [reviewCriteria, setReviewCriteria] = useState("");
   const [findingIndex, setFindingIndex] = useState(0);
   const [staleAcknowledged, setStaleAcknowledged] = useState(false);
+  const [scrollOffsets, setScrollOffsets] = useState<Record<ProviderId, number>>({ claude: 0, codex: 0 });
+  const previousLineCounts = useRef<Record<ProviderId, number>>({ claude: 0, codex: 0 });
+  const [activityIndex, setActivityIndex] = useState(0);
+  const [activityExpanded, setActivityExpanded] = useState(false);
+
+  useEffect(() => {
+    const counts: Record<ProviderId, number> = {
+      claude: lineCount(snapshot.lanes.claude.output),
+      codex: lineCount(snapshot.lanes.codex.output),
+    };
+    setScrollOffsets((current) => ({
+      claude: current.claude > 0
+        ? counts.claude < previousLineCounts.current.claude
+          ? 0
+          : current.claude + counts.claude - previousLineCounts.current.claude
+        : 0,
+      codex: current.codex > 0
+        ? counts.codex < previousLineCounts.current.codex
+          ? 0
+          : current.codex + counts.codex - previousLineCounts.current.codex
+        : 0,
+    }));
+    previousLineCounts.current = counts;
+  }, [snapshot.lanes.claude.output, snapshot.lanes.codex.output]);
 
   useEffect(() => {
     if (snapshot.approvals.length > 0) {
@@ -304,6 +384,18 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     if (key.escape) {
       setOverlay(null);
       setWriterConfirm(false);
+      return;
+    }
+    if (overlay === "help") {
+      if (key.ctrl && input === "g") setOverlay(null);
+      return;
+    }
+    if (overlay === "activity") {
+      const activities = snapshot.lanes[snapshot.focusedProvider].activities;
+      if (key.upArrow) setActivityIndex((index) => Math.max(0, index - 1));
+      else if (key.downArrow) setActivityIndex((index) => Math.min(Math.max(0, activities.length - 1), index + 1));
+      else if (input === " ") setActivityExpanded((value) => !value);
+      else if (key.ctrl && input === "t") setOverlay(null);
       return;
     }
     if (overlay === "model") {
@@ -403,28 +495,52 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       }
       return;
     }
-    if (key.meta && input === "1") orchestrator.focus("claude");
+    if (key.pageUp || key.pageDown || key.home || key.end) {
+      const provider = snapshot.focusedProvider;
+      const lane = snapshot.lanes[provider];
+      const viewportHeight = laneOutputHeight(columns, rows, snapshot.inspectorVisible, Boolean(lane.error));
+      const maximum = maxScrollOffset(lane.output, viewportHeight);
+      const page = Math.max(1, viewportHeight - 1);
+      setScrollOffsets((current) => ({
+        ...current,
+        [provider]: key.end
+          ? 0
+          : key.home
+            ? maximum
+            : key.pageUp
+              ? Math.min(maximum, current[provider] + page)
+              : Math.max(0, current[provider] - page),
+      }));
+    } else if (key.meta && input === "1") orchestrator.focus("claude");
     else if (key.meta && input === "2") orchestrator.focus("codex");
     else if (key.ctrl && input === "r") orchestrator.cycleTarget();
     else if (key.ctrl && input === "x") void orchestrator.cancel(snapshot.focusedProvider);
     else if (key.ctrl && input === "i") orchestrator.toggleInspector();
     else if (key.ctrl && input === "v") {
-      if (snapshot.mode !== "build") return;
       setReviewCriteria("");
       void orchestrator.prepareReview().then((ready) => { if (ready) setOverlay("review"); });
     } else if (key.ctrl && input === "f") {
-      if (!snapshot.review) return;
+      if (!snapshot.review) {
+        orchestrator.showNotice("Review findings are available only after a review draft or completed review exists.");
+        return;
+      }
       setFindingIndex(0);
       setStaleAcknowledged(false);
       setOverlay("findings");
       const first = snapshot.review.findings[0];
       if (first) void orchestrator.selectFinding(first.id);
     } else if (key.ctrl && input === "b") {
-      if (snapshot.mode !== "compare") return;
+      if (snapshot.mode !== "compare") {
+        orchestrator.showNotice("Writer promotion is available only from compare mode.");
+        return;
+      }
       setWriterProvider(snapshot.focusedProvider);
       setWriterConfirm(false);
       setOverlay("writer");
-    } else if (key.ctrl && input === "w") void orchestrator.revokeWriter();
+    } else if (key.ctrl && input === "w") {
+      if (snapshot.writer) void orchestrator.revokeWriter();
+      else orchestrator.showNotice("There is no writer lease to revoke.");
+    }
     else if (key.ctrl && input === "a") {
       setApprovalIndex(0);
       setOverlay("approval");
@@ -434,6 +550,13 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       setModelDraft(snapshot.lanes[snapshot.focusedProvider].requestedModel);
       setOverlay("model");
     } else if (key.ctrl && input === "p") setOverlay("actions");
+    else if (key.ctrl && input === "g") setOverlay("help");
+    else if (key.ctrl && input === "t") {
+      const activities = snapshot.lanes[snapshot.focusedProvider].activities;
+      setActivityIndex(Math.max(0, activities.length - 1));
+      setActivityExpanded(false);
+      setOverlay("activity");
+    }
     else if (key.ctrl && input === "d") setOverlay("diagnostics");
     else if (key.ctrl && input === "o") {
       setRoleProvider(snapshot.roles[ROLE_IDS[roleIndex] ?? "scout"]);
@@ -444,5 +567,5 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} />;
 }

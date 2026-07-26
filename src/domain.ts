@@ -4,6 +4,17 @@ export type WorkflowMode = "compare" | "build" | "review";
 export type CapabilityStability = "stable" | "preview" | "experimental";
 export type WorkspaceAccess = "read_only" | "workspace_write";
 export type ApprovalDecision = "allow_once" | "deny" | "cancel_turn";
+export type ProviderErrorKind =
+  | "discovery"
+  | "authentication"
+  | "invalid_model"
+  | "configuration"
+  | "permission"
+  | "protocol"
+  | "process_exit"
+  | "unknown";
+export type LaneActivityKind = "tool" | "file" | "approval" | "warning" | "error";
+export type LaneActivityStatus = "running" | "completed" | "blocked" | "resolved" | "failed";
 
 export type EventKind =
   | "session.started"
@@ -130,6 +141,20 @@ export interface LaneSnapshot {
   output: string;
   toolSummary: string | null;
   error: string | null;
+  errorKind: ProviderErrorKind | null;
+  activities: readonly LaneActivity[];
+}
+
+export interface LaneActivity {
+  id: string;
+  kind: LaneActivityKind;
+  status: LaneActivityStatus;
+  title: string;
+  detail: string | null;
+  safetyEffect: string | null;
+  timestamp: string;
+  completedAt: string | null;
+  durationMs: number | null;
 }
 
 export interface PromptEnvelope {

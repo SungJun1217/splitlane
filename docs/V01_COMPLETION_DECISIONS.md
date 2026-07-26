@@ -1,6 +1,6 @@
 # v0.1 Completion Decisions
 
-Status: proposed for user approval
+Status: approved for implementation on 2026-07-26
 
 Last updated: 2026-07-26
 
@@ -192,3 +192,25 @@ Approval of this document confirms these material choices:
    integration.
 6. Offline verification by default; paid live gates require separate explicit
    consent.
+
+## Approval record
+
+The user approved the complete proposal on 2026-07-26. Implementation remains
+incremental: approval of the contract does not waive per-increment verification
+or authorize paid live model turns.
+
+## Implementation checkpoints
+
+### 2026-07-26 — TUI activity and navigation
+
+- Added independent lane scrolling with explicit follow-tail state and stable
+  positioning while new output arrives.
+- Added a bounded structured activity log for tools, files, approvals, warnings,
+  and failures, including expandable details and safety effects.
+- Added provider-error classification with actionable guidance, a discoverable
+  keyboard-help overlay, and more explicit approval context.
+- Verified responsive focused/stacked/column layout behavior, Korean grapheme
+  rendering, scrolling, activity expansion, bounded retention, error guidance,
+  and terminal alternate-screen restoration.
+- Offline validation passed 69 tests plus type checking. No provider model turn
+  or credential was used.

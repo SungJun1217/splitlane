@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type {
   ApprovalDecision,
   AppSnapshot,
+  LaneActivity,
+  LaneActivityKind,
+  LaneActivityStatus,
   LaneSnapshot,
   NormalizedEvent,
   PendingApproval,
@@ -24,6 +27,7 @@ import { isPathInsideWorkspace, WorkspaceGuard } from "../workspace/guard.ts";
 import { captureReviewPatch, createReviewEnvelope, reviewMechanismStability } from "../review/envelope.ts";
 import { buildFindingsRelay, buildReviewPrompt, parseReviewFindings } from "../review/findings.ts";
 import { loadFindingPreview } from "../review/preview.ts";
+import { classifyProviderError } from "./provider-error.ts";
 
 // Visible M1 routing hypotheses only; this is not the approved v0.1 default profile.
 const M1_PREVIEW_ROLES: RoleProfile = {
@@ -45,6 +49,8 @@ const blankLane = (provider: ProviderId): LaneSnapshot => ({
   output: "",
   toolSummary: null,
   error: null,
+  errorKind: null,
+  activities: [],
 });
 
 const canAccept = (lane: LaneSnapshot): boolean =>
@@ -119,6 +125,54 @@ export class CompareOrchestrator {
     this.#patch({ diagnostics: [...this.#snapshot.diagnostics, `${provider}: ${clean}`].slice(-100) });
   }
 
+  #addActivity(
+    provider: ProviderId,
+    activity: Omit<LaneActivity, "timestamp" | "completedAt" | "durationMs"> & {
+      timestamp?: string;
+      completedAt?: string | null;
+      durationMs?: number | null;
+    },
+  ): void {
+    const lane = this.#snapshot.lanes[provider];
+    const detail = activity.detail ? sanitizeTerminalText(activity.detail).slice(0, 4_096) : null;
+    this.#patchLane(provider, {
+      activities: [...lane.activities, {
+        ...activity,
+        title: sanitizeTerminalText(activity.title).slice(0, 256),
+        detail,
+        safetyEffect: activity.safetyEffect ? sanitizeTerminalText(activity.safetyEffect).slice(0, 256) : null,
+        timestamp: activity.timestamp ?? new Date().toISOString(),
+        completedAt: activity.completedAt ?? (activity.status === "running" || activity.status === "blocked" ? null : activity.timestamp ?? new Date().toISOString()),
+        durationMs: activity.durationMs ?? (activity.status === "running" || activity.status === "blocked" ? null : 0),
+      }].slice(-100),
+    });
+  }
+
+  #resolveActivity(
+    provider: ProviderId,
+    kind: LaneActivityKind,
+    status: LaneActivityStatus,
+    detail?: string | null,
+  ): void {
+    const lane = this.#snapshot.lanes[provider];
+    const index = lane.activities.findLastIndex((item) =>
+      item.kind === kind && ["running", "blocked"].includes(item.status)
+    );
+    if (index < 0) return;
+    const completedAt = new Date().toISOString();
+    this.#patchLane(provider, {
+      activities: lane.activities.map((item, itemIndex) => itemIndex === index
+        ? {
+            ...item,
+            status,
+            detail: detail ? sanitizeTerminalText(detail).slice(0, 4_096) : item.detail,
+            completedAt,
+            durationMs: Math.max(0, Date.parse(completedAt) - Date.parse(item.timestamp)),
+          }
+        : item),
+    });
+  }
+
   async initialize(): Promise<void> {
     const [claude, codex, git] = await Promise.all([
       this.adapters.claude.probe(),
@@ -138,10 +192,10 @@ export class CompareOrchestrator {
       lanes: {
         claude: claude.available
           ? this.#snapshot.lanes.claude
-          : { ...this.#snapshot.lanes.claude, status: "UNAVAILABLE", error: claudeError },
+          : { ...this.#snapshot.lanes.claude, status: "UNAVAILABLE", error: claudeError, errorKind: classifyProviderError(claudeError) },
         codex: codex.available
           ? this.#snapshot.lanes.codex
-          : { ...this.#snapshot.lanes.codex, status: "UNAVAILABLE", error: codexError },
+          : { ...this.#snapshot.lanes.codex, status: "UNAVAILABLE", error: codexError, errorKind: classifyProviderError(codexError) },
       },
     });
   }
@@ -162,6 +216,10 @@ export class CompareOrchestrator {
 
   toggleInspector(): void {
     this.#patch({ inspectorVisible: !this.#snapshot.inspectorVisible });
+  }
+
+  showNotice(message: string): void {
+    this.#patch({ notice: sanitizeTerminalText(message).trim().slice(0, 1_024) || null });
   }
 
   setModel(provider: ProviderId, model: string): void {
@@ -377,7 +435,7 @@ export class CompareOrchestrator {
       if (!this.#workspace.revoke(lease.id)) throw new Error("Writer lease revocation failed before review.");
       const envelope = Object.freeze({ ...review.envelope, acceptanceCriteria: criteria });
       const running: ReviewSnapshot = { ...review, status: "running", envelope, findings: [], activeFindingId: null, preview: null, stale: false, parseError: null };
-      this.#patchLane(review.reviewer, { output: "", error: null, toolSummary: "read-only review" });
+      this.#patchLane(review.reviewer, { output: "", error: null, errorKind: null, toolSummary: "read-only review" });
       this.#patch({
         mode: "review",
         writer: null,
@@ -614,7 +672,7 @@ export class CompareOrchestrator {
       this.#lastWriterPrompt = cleanPrompt;
     }
     for (const provider of selected) {
-      this.#patchLane(provider, { status: "STARTING", error: null, toolSummary: null });
+      this.#patchLane(provider, { status: "STARTING", error: null, errorKind: null, toolSummary: null });
     }
     this.#patch({ notice: null });
     void Promise.allSettled(selected.map((provider) => this.#runLane(provider, envelope)));
@@ -665,7 +723,16 @@ export class CompareOrchestrator {
       this.#patchLane(provider, {
         status: "FAILED",
         error: sanitizeTerminalText((error as Error).message),
+        errorKind: classifyProviderError((error as Error).message),
         turnId: null,
+      });
+      this.#addActivity(provider, {
+        id: randomUUID(),
+        kind: "error",
+        status: "failed",
+        title: "Provider turn failed to start",
+        detail: (error as Error).message,
+        safetyEffect: null,
       });
       if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
     }
@@ -674,7 +741,16 @@ export class CompareOrchestrator {
   #applyEvent(provider: ProviderId, providerEvent: NormalizedEvent): void {
     if (providerEvent.provider !== provider) {
       this.#diagnose(provider, "Cross-provider event rejected.");
-      this.#patchLane(provider, { status: "FAILED", error: "Cross-provider event rejected." });
+      this.#patchLane(provider, { status: "FAILED", error: "Cross-provider event rejected.", errorKind: "protocol" });
+      this.#addActivity(provider, {
+        id: providerEvent.event_id,
+        kind: "error",
+        status: "failed",
+        title: "Cross-provider event rejected",
+        detail: null,
+        safetyEffect: "provider isolation preserved",
+        timestamp: providerEvent.timestamp,
+      });
       if (this.#snapshot.writer === provider) this.#completeRevocation(provider);
       return;
     }
@@ -699,12 +775,33 @@ export class CompareOrchestrator {
         break;
       case "tool.started":
         this.#patchLane(provider, { toolSummary: `tool: ${String(providerEvent.payload.tool ?? "unknown")}` });
+        this.#addActivity(provider, {
+          id: providerEvent.event_id,
+          kind: "tool",
+          status: "running",
+          title: String(providerEvent.payload.tool ?? "Tool"),
+          detail: [providerEvent.payload.command, providerEvent.payload.path]
+            .filter((value): value is string => typeof value === "string")
+            .join(" · ") || null,
+          safetyEffect: providerEvent.safety_effect ?? null,
+          timestamp: providerEvent.timestamp,
+        });
         break;
       case "tool.completed":
         this.#patchLane(provider, { toolSummary: `tool completed: ${String(providerEvent.payload.tool ?? "unknown")}` });
+        this.#resolveActivity(provider, "tool", "completed");
         break;
       case "file.changed": {
         const path = typeof providerEvent.payload.path === "string" ? providerEvent.payload.path : null;
+        this.#addActivity(provider, {
+          id: providerEvent.event_id,
+          kind: "file",
+          status: "completed",
+          title: path ? "File changed" : "File change reported",
+          detail: path,
+          safetyEffect: this.#snapshot.writer === provider ? "writer workspace" : "read-only anomaly",
+          timestamp: providerEvent.timestamp,
+        });
         if (this.#snapshot.writer === provider) this.#git.noteWriterChange(path);
         if (this.#gitRefreshTimer) clearTimeout(this.#gitRefreshTimer);
         this.#gitRefreshTimer = setTimeout(() => {
@@ -714,11 +811,23 @@ export class CompareOrchestrator {
         break;
       }
       case "approval.requested":
+        this.#addActivity(provider, {
+          id: providerEvent.event_id,
+          kind: "approval",
+          status: "blocked",
+          title: String(providerEvent.payload.tool ?? "Approval requested"),
+          detail: [providerEvent.payload.command, providerEvent.payload.path]
+            .filter((value): value is string => typeof value === "string")
+            .join(" · ") || null,
+          safetyEffect: this.#snapshot.writer === provider ? "temporary writer approval" : "deny-only read-only request",
+          timestamp: providerEvent.timestamp,
+        });
         if (this.#snapshot.approvals.some((approval) => approval.provider === provider)) {
           this.#patchLane(provider, { status: "BLOCKED" });
         }
         break;
       case "approval.resolved":
+        this.#resolveActivity(provider, "approval", "resolved", `decision: ${String(providerEvent.payload.decision ?? "unknown")}`);
         if (!this.#snapshot.approvals.some((approval) => approval.provider === provider)) {
           this.#patchLane(provider, { status: "RUNNING" });
         }
@@ -742,27 +851,56 @@ export class CompareOrchestrator {
           status: "FAILED",
           turnId: null,
           error: sanitizeTerminalText(providerEvent.payload.error ?? "Provider turn failed"),
+          errorKind: classifyProviderError(providerEvent.payload.error ?? "Provider turn failed"),
+        });
+        this.#addActivity(provider, {
+          id: providerEvent.event_id,
+          kind: "error",
+          status: "failed",
+          title: "Provider turn failed",
+          detail: String(providerEvent.payload.error ?? "Provider turn failed"),
+          safetyEffect: null,
+          timestamp: providerEvent.timestamp,
         });
         void this.refreshGit();
         if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
         break;
       case "provider.warning":
         this.#diagnose(provider, providerEvent.payload.message ?? "Provider warning");
-        this.#patchLane(provider, { error: sanitizeTerminalText(providerEvent.payload.message ?? "Provider warning") });
+        this.#patchLane(provider, {
+          error: sanitizeTerminalText(providerEvent.payload.message ?? "Provider warning"),
+          errorKind: classifyProviderError(providerEvent.payload.message ?? "Provider warning"),
+        });
+        this.#addActivity(provider, {
+          id: providerEvent.event_id,
+          kind: "warning",
+          status: "failed",
+          title: "Provider warning",
+          detail: String(providerEvent.payload.message ?? "Provider warning"),
+          safetyEffect: null,
+          timestamp: providerEvent.timestamp,
+        });
         break;
     }
   }
 
   async cancel(provider: ProviderId): Promise<void> {
     const lane = this.#snapshot.lanes[provider];
-    if (!lane.turnId || !["STARTING", "RUNNING", "BLOCKED"].includes(lane.status)) return;
+    if (!lane.turnId || !["STARTING", "RUNNING", "BLOCKED"].includes(lane.status)) {
+      this.#patch({ notice: `${provider} has no cancellable turn.` });
+      return;
+    }
     this.#resolveApprovalsFor(provider, "cancel_turn");
     this.#patchLane(provider, { status: "CANCELLING" });
     try {
       await this.adapters[provider].interrupt(lane.turnId);
     } catch (error) {
       this.#diagnose(provider, (error as Error).message);
-      this.#patchLane(provider, { status: "FAILED", error: sanitizeTerminalText((error as Error).message) });
+      this.#patchLane(provider, {
+        status: "FAILED",
+        error: sanitizeTerminalText((error as Error).message),
+        errorKind: classifyProviderError((error as Error).message),
+      });
       if (this.#snapshot.writer === provider) this.#completeRevocation(provider);
     }
   }
