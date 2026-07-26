@@ -1064,6 +1064,11 @@ v0.1 is ready only when:
 
 ## 21. Decisions still requiring user approval
 
+The combined implementation proposal for the remaining v0.1 usability scope is
+recorded in `docs/V01_COMPLETION_DECISIONS.md`. It remains proposed until the
+user approves its queue, configuration, restoration, handoff, worktree, and
+live-verification contracts.
+
 1. Product thesis: approve `route or compare → approve handoff → build → two-lens review` as the primary flow.
 2. v0.1 workspace: **approved on 2026-07-26** — use one current-tree writer
    lease and defer isolated worktrees to M5.
