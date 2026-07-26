@@ -90,6 +90,7 @@ jobs:
             release/splitlane-darwin-arm64 \
             release/splitlane-linux-x64 \
             release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
             --title "Splitlane $GITHUB_REF_NAME"
