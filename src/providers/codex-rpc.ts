@@ -11,7 +11,7 @@ interface PendingRequest {
 }
 
 export interface RpcMessage {
-  id?: number;
+  id?: number | string;
   method?: string;
   params?: Record<string, unknown>;
   result?: unknown;
@@ -74,7 +74,7 @@ export class CodexRpcClient {
       this.onNotification({ method: "diagnostic/malformed", params: { line: sanitizeTerminalText(line) } });
       return;
     }
-    if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
+    if (typeof message.id === "number" && (message.result !== undefined || message.error !== undefined)) {
       const pending = this.#pending.get(message.id);
       if (!pending) return;
       clearTimeout(pending.timer);
@@ -106,7 +106,7 @@ export class CodexRpcClient {
     this.#child?.stdin.write(`${JSON.stringify({ method, params })}\n`);
   }
 
-  respond(id: number, result: Record<string, unknown>): void {
+  respond(id: number | string, result: Record<string, unknown>): void {
     this.#child?.stdin.write(`${JSON.stringify({ id, result })}\n`);
   }
 

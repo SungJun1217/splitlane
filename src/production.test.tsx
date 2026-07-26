@@ -1,4 +1,7 @@
 import React from "react";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { renderToString } from "ink";
 import stringWidth from "string-width";
@@ -6,6 +9,7 @@ import { CompareOrchestrator } from "./core/orchestrator.ts";
 import { AsyncQueue } from "./core/async-queue.ts";
 import { event } from "./core/events.ts";
 import type {
+  ApprovalDecision,
   AppSnapshot,
   NormalizedEvent,
   ProviderAdapter,
@@ -17,20 +21,23 @@ import type {
   TurnOptions,
 } from "./domain.ts";
 import { appendBounded, sanitizeTerminalText } from "./terminal/sanitize.ts";
-import { ClaudeAdapter, parseClaudeMessage } from "./providers/claude.ts";
-import { parseCodexNotification } from "./providers/codex.ts";
+import { ClaudeAdapter, claudePermissionResult, parseClaudeMessage } from "./providers/claude.ts";
+import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCodexNotification } from "./providers/codex.ts";
 import { CodexRpcClient } from "./providers/codex-rpc.ts";
-import { parseStatus } from "./git/observer.ts";
+import { GitObserver, parseStatus } from "./git/observer.ts";
 import { SplitlaneView } from "./ui/app.tsx";
 import { selectLayout } from "./ui/layout.ts";
 import { removeLastGrapheme } from "./ui/text.ts";
+import { WorkspaceGuard, isPathInsideWorkspace } from "./workspace/guard.ts";
 
-type Scenario = "complete" | "fail" | "hold" | "approval";
+type Scenario = "complete" | "fail" | "hold" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval";
 
 class FakeAdapter implements ProviderAdapter {
   readonly sessions: SessionOptions[] = [];
   readonly prompts: string[] = [];
   readonly interrupted: string[] = [];
+  readonly turnOptions: TurnOptions[] = [];
+  readonly approvalDecisions: ApprovalDecision[] = [];
   readonly #active = new Map<string, AsyncQueue<NormalizedEvent>>();
 
   constructor(readonly provider: ProviderId, readonly scenario: Scenario = "complete") {}
@@ -49,8 +56,9 @@ class FakeAdapter implements ProviderAdapter {
     };
   }
 
-  async startTurn(session: SessionHandle, prompt: string, _options: TurnOptions): Promise<ProviderTurn> {
+  async startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {
     this.prompts.push(prompt);
+    this.turnOptions.push(options);
     const id = `${this.provider}-turn-${this.prompts.length}`;
     const queue = new AsyncQueue<NormalizedEvent>();
     this.#active.set(id, queue);
@@ -67,19 +75,42 @@ class FakeAdapter implements ProviderAdapter {
       } else if (this.scenario === "complete") {
         queue.push(event(this.provider, "turn.completed", { sessionId: session.id, turnId: id }));
         queue.close();
-      } else if (this.scenario === "approval") {
-        queue.push(event(this.provider, "approval.requested", { sessionId: session.id, turnId: id }));
+      } else if (["approval", "double_approval", "network_approval", "outside_approval", "unknown_file_approval"].includes(this.scenario)) {
+        const count = this.scenario === "double_approval" ? 2 : 1;
+        const requests = Array.from({ length: count }, (_, index) => {
+          queue.push(event(this.provider, "approval.requested", { sessionId: session.id, turnId: id }));
+          return options.requestApproval({
+            providerRequestId: `${this.provider}-approval-${index}`,
+            kind: "file_change",
+            tool: `Fake write ${index + 1}`,
+            command: `touch approved-${index + 1}.txt`,
+            cwd: options.projectRoot,
+            path: this.scenario === "unknown_file_approval"
+              ? null
+              : this.scenario === "outside_approval"
+              ? resolve(options.projectRoot, "..", "outside.txt")
+              : `approved-${index + 1}.txt`,
+            paths: this.scenario === "unknown_file_approval" ? [] : [this.scenario === "outside_approval"
+              ? resolve(options.projectRoot, "..", "outside.txt")
+              : `approved-${index + 1}.txt`],
+            reason: "test approval",
+            networkEffect: this.scenario === "network_approval" ? "requested" : "off",
+          });
+        });
+        void Promise.all(requests).then((decisions) => {
+          this.approvalDecisions.push(...decisions);
+          for (const decision of decisions) {
+            queue.push(event(this.provider, "approval.resolved", { sessionId: session.id, turnId: id, payload: { decision } }));
+          }
+          queue.push(event(this.provider, decisions.includes("cancel_turn") ? "turn.cancelled" : "turn.completed", {
+            sessionId: session.id,
+            turnId: id,
+          }));
+          queue.close();
+        });
       }
     });
     return { id, events: queue };
-  }
-
-  resolveApproval(): void {
-    const [turnId, queue] = [...this.#active.entries()].at(-1) ?? [];
-    if (!turnId || !queue) return;
-    queue.push(event(this.provider, "approval.resolved", { turnId }));
-    queue.push(event(this.provider, "turn.completed", { turnId }));
-    queue.close();
   }
 
   async interrupt(turnId: string): Promise<void> {
@@ -107,6 +138,22 @@ function setup(claudeScenario: Scenario = "complete", codexScenario: Scenario = 
   const codex = new FakeAdapter("codex", codexScenario);
   const orchestrator = new CompareOrchestrator(process.cwd(), { claude, codex });
   return { orchestrator, claude, codex };
+}
+
+function readOnlyTurnOptions(): TurnOptions {
+  return {
+    requestedModel: "default",
+    projectRoot: process.cwd(),
+    workspaceAccess: "read_only",
+    writerLease: null,
+    requestApproval: async () => "deny",
+  };
+}
+
+async function gitCommand(root: string, ...args: string[]): Promise<void> {
+  const child = Bun.spawn(["git", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const exitCode = await child.exited;
+  if (exitCode !== 0) throw new Error(await new Response(child.stderr).text());
 }
 
 describe("production orchestrator", () => {
@@ -149,16 +196,167 @@ describe("production orchestrator", () => {
   test("approval is visible as blocked and model changes reset only that session", async () => {
     const { orchestrator, claude, codex } = setup("approval", "complete");
     await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
     orchestrator.setTarget("claude");
     orchestrator.setModel("claude", "claude-test-exact");
     await orchestrator.dispatch("inspect");
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "BLOCKED");
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(1);
     expect(claude.sessions[0]?.requestedModel).toBe("claude-test-exact");
     expect(codex.sessions).toHaveLength(0);
-    claude.resolveApproval();
+    const approval = orchestrator.getSnapshot().approvals[0];
+    expect(approval && orchestrator.resolveApproval(approval.id, "allow_once")).toBe(true);
     await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(claude.approvalDecisions).toEqual(["allow_once"]);
     orchestrator.setModel("claude", "default");
     expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBeNull();
+    await orchestrator.close();
+  });
+
+  test("a lane stays blocked until every concurrent approval is resolved", async () => {
+    const { orchestrator, claude } = setup("double_approval", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("two approvals");
+    await waitFor(() => orchestrator.getSnapshot().approvals.length === 2);
+    const first = orchestrator.getSnapshot().approvals[0];
+    expect(first && orchestrator.resolveApproval(first.id, "allow_once")).toBe(true);
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(1);
+    expect(orchestrator.getSnapshot().lanes.claude.status).toBe("BLOCKED");
+    const second = orchestrator.getSnapshot().approvals[0];
+    expect(second && orchestrator.resolveApproval(second.id, "deny")).toBe(true);
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(claude.approvalDecisions).toEqual(["allow_once", "deny"]);
+    await orchestrator.close();
+  });
+
+  test("one writer lease routes build broadcast as writer plus read-only peer", async () => {
+    const { orchestrator, claude, codex } = setup();
+    await orchestrator.initialize();
+    const promotions = await Promise.all([
+      orchestrator.promoteWriter("claude", true),
+      orchestrator.promoteWriter("codex", true),
+    ]);
+    expect(promotions).toEqual([true, false]);
+    expect(orchestrator.getSnapshot().writer).toBe("claude");
+    expect(orchestrator.getSnapshot().target).toBe("both");
+    await orchestrator.dispatch("build once, review once");
+    await waitFor(() => claude.turnOptions.length === 1 && codex.turnOptions.length === 1);
+    expect(claude.turnOptions[0]?.workspaceAccess).toBe("workspace_write");
+    expect(claude.turnOptions[0]?.writerLease?.provider).toBe("claude");
+    expect(codex.turnOptions[0]?.workspaceAccess).toBe("read_only");
+    expect(codex.turnOptions[0]?.writerLease).toBeNull();
+    await orchestrator.close();
+  });
+
+  test("read-only peer approval is denied without entering the inbox", async () => {
+    const { orchestrator, codex } = setup("complete", "approval");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("codex");
+    await orchestrator.dispatch("review read only");
+    await waitFor(() => orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
+    expect(codex.approvalDecisions).toEqual(["deny"]);
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(0);
+    expect(orchestrator.getSnapshot().diagnostics.join("\n")).toContain("read-only lane was denied");
+    await orchestrator.close();
+  });
+
+  test("writer network approval is denied even in build mode", async () => {
+    const { orchestrator, claude } = setup("network_approval", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("try network");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(claude.approvalDecisions).toEqual(["deny"]);
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(0);
+    expect(orchestrator.getSnapshot().notice).toContain("network access is disabled");
+    await orchestrator.close();
+  });
+
+  test("writer approval outside the project root is denied without entering the inbox", async () => {
+    const { orchestrator, claude } = setup("outside_approval", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("try outside root");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(claude.approvalDecisions).toEqual(["deny"]);
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(0);
+    expect(orchestrator.getSnapshot().notice).toContain("outside the writer workspace");
+    await orchestrator.close();
+  });
+
+  test("writer file approval with an unknown boundary is denied without entering the inbox", async () => {
+    const { orchestrator, claude } = setup("unknown_file_approval", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("try unknown file boundary");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "COMPLETED");
+    expect(claude.approvalDecisions).toEqual(["deny"]);
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(0);
+    expect(orchestrator.getSnapshot().notice).toContain("file-change boundary is unknown");
+    await orchestrator.close();
+  });
+
+  test("cancelling an approval cancels the writer turn and revokes the lease", async () => {
+    const { orchestrator, claude } = setup("approval", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("request then cancel");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "BLOCKED");
+    const approval = orchestrator.getSnapshot().approvals[0];
+    expect(approval && orchestrator.resolveApproval(approval.id, "cancel_turn")).toBe(true);
+    await waitFor(() => orchestrator.getSnapshot().mode === "compare");
+    expect(orchestrator.getSnapshot().writer).toBeNull();
+    expect(claude.interrupted).toHaveLength(1);
+    await orchestrator.close();
+  });
+
+  test("closing with a pending approval fails closed and removes the writer lease", async () => {
+    const { orchestrator, claude } = setup("approval", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("request then close");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "BLOCKED");
+    await orchestrator.close();
+    await waitFor(() => claude.approvalDecisions.length === 1);
+    expect(claude.approvalDecisions).toEqual(["cancel_turn"]);
+    expect(orchestrator.getSnapshot().approvals).toHaveLength(0);
+    expect(orchestrator.getSnapshot().writer).toBeNull();
+    expect(orchestrator.getSnapshot().mode).toBe("compare");
+  });
+
+  test("a writer failure revokes the lease while leaving the peer result intact", async () => {
+    const { orchestrator } = setup("fail", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    await orchestrator.dispatch("writer fails, peer continues");
+    await waitFor(() => orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
+    expect(orchestrator.getSnapshot().lanes.claude.status).toBe("FAILED");
+    expect(orchestrator.getSnapshot().mode).toBe("compare");
+    expect(orchestrator.getSnapshot().writer).toBeNull();
+    expect(orchestrator.getSnapshot().lanes.codex.output).toContain("codex:한글");
+    await orchestrator.close();
+  });
+
+  test("revoking an active writer cancels only that lane and restores compare", async () => {
+    const { orchestrator, claude, codex } = setup("hold", "hold");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("hold writer");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "RUNNING");
+    await orchestrator.revokeWriter();
+    await waitFor(() => orchestrator.getSnapshot().mode === "compare");
+    expect(orchestrator.getSnapshot().writer).toBeNull();
+    expect(claude.interrupted).toHaveLength(1);
+    expect(codex.interrupted).toHaveLength(0);
     await orchestrator.close();
   });
 });
@@ -196,6 +394,138 @@ describe("terminal rendering", () => {
     expect(output).toContain("안녕하세요");
     expect(output).toContain("COMPARE");
     expect(output).toContain("writer NONE");
+  });
+
+  test("renders writer confirmation and approval safety details", () => {
+    const { orchestrator } = setup();
+    const base = orchestrator.getSnapshot();
+    const writer = renderToString(
+      <SplitlaneView snapshot={base} prompt="" columns={120} rows={30} overlay="writer" writerConfirm />,
+      { columns: 120 },
+    );
+    expect(writer).toContain("ENTER BUILD · SINGLE WRITER · CONFIRM");
+    expect(writer).toContain("network off");
+
+    const approvalSnapshot: AppSnapshot = {
+      ...base,
+      approvals: [{
+        id: "approval",
+        provider: "claude",
+        turnId: "turn",
+        providerRequestId: "provider-request",
+        kind: "file_change",
+        requestedAt: new Date(0).toISOString(),
+        tool: "Run command",
+        command: "touch approved.txt",
+        cwd: process.cwd(),
+        path: "approved.txt",
+        paths: ["approved.txt"],
+        reason: "write output",
+        networkEffect: "off",
+        outsideWorkspace: false,
+      }],
+    };
+    const approval = renderToString(
+      <SplitlaneView snapshot={approvalSnapshot} prompt="" columns={120} rows={30} overlay="approval" />,
+      { columns: 120 },
+    );
+    expect(approval).toContain("APPROVAL INBOX · 1 PENDING");
+    expect(approval).toContain("A allow once · D deny · X cancel turn");
+  });
+});
+
+describe("M2 workspace guard", () => {
+  test("dirty trees require explicit acknowledgement before promotion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-m2-dirty-"));
+    try {
+      await gitCommand(root, "init", "-q");
+      await Bun.write(join(root, "existing.txt"), "pre-existing\n");
+      const claude = new FakeAdapter("claude");
+      const codex = new FakeAdapter("codex");
+      const orchestrator = new CompareOrchestrator(root, { claude, codex });
+      await orchestrator.initialize();
+      expect(orchestrator.getSnapshot().git.dirty).toBe(true);
+      expect(await orchestrator.promoteWriter("claude", false)).toBe(false);
+      expect(orchestrator.getSnapshot().mode).toBe("compare");
+      expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+      await orchestrator.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Git baseline preserves pre-existing labels and attributes only explicit writer hints", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-m2-git-"));
+    try {
+      await gitCommand(root, "init", "-q");
+      await gitCommand(root, "config", "user.email", "test@example.invalid");
+      await gitCommand(root, "config", "user.name", "Splitlane Test");
+      await Bun.write(join(root, "existing.txt"), "committed\n");
+      await gitCommand(root, "add", "existing.txt");
+      await gitCommand(root, "commit", "-qm", "baseline");
+      await Bun.write(join(root, "existing.txt"), "dirty before lease\n");
+
+      const observer = new GitObserver(root);
+      await observer.captureBaseline();
+      expect(observer.snapshot.evidence).toContainEqual({ path: "existing.txt", classification: "pre-existing" });
+
+      await Bun.write(join(root, "external.txt"), "unknown source\n");
+      observer.noteWriterChange(join(root, "writer.txt"));
+      await Bun.write(join(root, "writer.txt"), "provider hint\n");
+      const snapshot = await observer.refresh();
+      expect(snapshot.evidence).toContainEqual({ path: "existing.txt", classification: "pre-existing" });
+      expect(snapshot.evidence).toContainEqual({ path: "writer.txt", classification: "writer-hinted" });
+      expect(snapshot.evidence).toContainEqual({ path: "external.txt", classification: "unknown/external" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("provider adapters reject workspace-write without a matching lease", async () => {
+    const options: TurnOptions = {
+      ...readOnlyTurnOptions(),
+      workspaceAccess: "workspace_write",
+      writerLease: null,
+    };
+    const claude = new ClaudeAdapter((() => { throw new Error("must not start"); }) as never);
+    const claudeSession = await claude.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    await expect(claude.startTurn(claudeSession, "write", options)).rejects.toThrow("matching writer lease");
+
+    const codex = new CodexAdapter();
+    const codexSession: SessionHandle = {
+      provider: "codex",
+      id: "thread",
+      requestedModel: "default",
+      effectiveModel: "default",
+    };
+    await expect(codex.startTurn(codexSession, "write", options)).rejects.toThrow("matching writer lease");
+
+    const forged = {
+      id: "forged",
+      provider: "claude" as const,
+      projectRoot: process.cwd(),
+      grantedAt: new Date(0).toISOString(),
+      baselineFingerprint: "forged",
+    };
+    await expect(claude.startTurn(claudeSession, "write", {
+      ...options,
+      writerLease: forged,
+    })).rejects.toThrow("matching writer lease");
+  });
+
+  test("workspace boundary resolves symlink ancestors before approval", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-m2-boundary-"));
+    const outside = await mkdtemp(join(tmpdir(), "splitlane-m2-outside-"));
+    try {
+      await Bun.write(join(outside, "existing.txt"), "outside\n");
+      await symlink(outside, join(root, "escape"), "dir");
+      expect(isPathInsideWorkspace(root, "inside/new.txt")).toBe(true);
+      expect(isPathInsideWorkspace(root, join("escape", "new.txt"))).toBe(false);
+      expect(isPathInsideWorkspace(root, join(outside, "existing.txt"))).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });
 
@@ -238,6 +568,19 @@ describe("captured provider event compatibility", () => {
     expect(parseCodexNotification(fixture.cancelled_event)[0]?.kind).toBe("turn.cancelled");
   });
 
+  test("maps captured Codex approval requests to temporary UI decisions", async () => {
+    const fixture = await Bun.file("test/fixtures/codex-m2-approvals.redacted.json").json() as {
+      requests: Parameters<typeof parseCodexApprovalRequest>[0][];
+    };
+    const [command, file] = fixture.requests.map(parseCodexApprovalRequest);
+    expect(command).toMatchObject({ tool: "Command execution", command: "touch output.txt", networkEffect: "off" });
+    expect(file).toMatchObject({ providerRequestId: "file-42", tool: "File change", path: "<project-root>" });
+    expect(codexApprovalResponse("allow_once")).toEqual({ decision: "accept" });
+    expect(codexApprovalResponse("deny")).toEqual({ decision: "decline" });
+    expect(codexApprovalResponse("cancel_turn")).toEqual({ decision: "cancel" });
+    expect(parseCodexApprovalRequest({ id: 99, method: "unknown/request", params: {} })).toBeNull();
+  });
+
   test("turns an abrupt Claude SDK stream end into an explicit failure", async () => {
     let closeCalled = false;
     async function* abruptStream() {
@@ -249,19 +592,76 @@ describe("captured provider event compatibility", () => {
     };
     const adapter = new ClaudeAdapter(fakeQuery as never);
     const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
-    const turn = await adapter.startTurn(session, "read only", { requestedModel: "default" });
+    const turn = await adapter.startTurn(session, "read only", readOnlyTurnOptions());
     const kinds: NormalizedEvent["kind"][] = [];
     for await (const item of turn.events) kinds.push(item.kind);
     expect(kinds).toEqual(["session.started", "turn.started", "turn.failed"]);
     expect(closeCalled).toBe(true);
   });
 
+  test("Claude build approval maps allow-once without persistent permission updates", async () => {
+    let permissionResult: Record<string, unknown> | null = null;
+    let capturedOptions: Record<string, unknown> | null = null;
+    let capturedRequest: unknown = null;
+    const fakeQuery = ({ options }: { options: Record<string, unknown> }) => {
+      capturedOptions = options;
+      async function* stream() {
+        yield { type: "system", subtype: "init", session_id: "session", model: "fake" };
+        const callback = options.canUseTool as (
+          tool: string,
+          input: Record<string, unknown>,
+          context: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+        permissionResult = await callback("Bash", { command: "touch approved.txt" }, {
+          signal: new AbortController().signal,
+          toolUseID: "tool-use",
+          requestId: "request-id",
+          displayName: "Run command",
+          decisionReason: "write a file",
+        });
+        yield { type: "result", subtype: "success", is_error: false };
+      }
+      return Object.assign(stream(), { close: () => {} });
+    };
+    const adapter = new ClaudeAdapter(fakeQuery as never);
+    const session = await adapter.startSession({ projectRoot: process.cwd(), requestedModel: "default" });
+    const guard = new WorkspaceGuard(process.cwd());
+    const turn = await adapter.startTurn(session, "write once", {
+      requestedModel: "default",
+      projectRoot: process.cwd(),
+      workspaceAccess: "workspace_write",
+      writerLease: guard.grant("claude", "baseline"),
+      requestApproval: async (request) => {
+        capturedRequest = request;
+        return "allow_once";
+      },
+    });
+    for await (const _event of turn.events) {}
+    expect(capturedRequest).toMatchObject({ tool: "Run command", command: "touch approved.txt", networkEffect: "off" });
+    expect(permissionResult).toMatchObject({ behavior: "allow", decisionClassification: "user_temporary" });
+    expect(permissionResult).not.toHaveProperty("updatedPermissions");
+    expect(capturedOptions).toMatchObject({ permissionMode: "default" });
+    expect(claudePermissionResult("deny", "tool-use")).toMatchObject({
+      behavior: "deny",
+      interrupt: false,
+      decisionClassification: "user_reject",
+    });
+    expect(claudePermissionResult("cancel_turn", "tool-use")).toMatchObject({
+      behavior: "deny",
+      interrupt: true,
+      decisionClassification: "user_reject",
+    });
+  });
+
   test("production JSONL transport reports malformed input and abrupt process exit", async () => {
     const notifications: string[] = [];
     const exitErrors: Error[] = [];
-    const client = new CodexRpcClient(
+    let client: CodexRpcClient;
+    client = new CodexRpcClient(
       (message) => { if (message.method) notifications.push(message.method); },
-      () => {},
+      (message) => {
+        if (message.id !== undefined) client.respond(message.id, { decision: "decline" });
+      },
       (error) => { exitErrors.push(error); },
       process.execPath,
       ["test/fixtures/fake-jsonl-server.mjs"],
@@ -271,6 +671,8 @@ describe("captured provider event compatibility", () => {
     expect(initialized.userAgent).toBe("fake-app-server/1.0");
     client.notify("emit/malformed");
     await waitFor(() => notifications.includes("diagnostic/malformed"));
+    client.notify("request/server");
+    await waitFor(() => notifications.includes("approval/observed"));
     client.notify("exit/abrupt");
     await waitFor(() => exitErrors.length > 0);
     expect(exitErrors[0]?.message).toContain("code=17");

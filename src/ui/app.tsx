@@ -1,11 +1,11 @@
-import React, { useState, useSyncExternalStore } from "react";
+import React, { useEffect, useState, useSyncExternalStore } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { AppSnapshot, LaneSnapshot, ProviderId, RoleId } from "../domain.ts";
 import type { CompareOrchestrator } from "../core/orchestrator.ts";
 import { contentHeight, selectLayout } from "./layout.ts";
 import { removeLastGrapheme, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -19,10 +19,12 @@ const ROLE_IDS: readonly RoleId[] = [
 const ACTIONS = [
   ["common.prompt", "stable", "Send to selected target"],
   ["common.cancel_lane", "stable", "Cancel focused lane only"],
+  ["common.writer_lease", "stable", "Promote or revoke one visible writer"],
+  ["common.approval_inbox", "stable", "Allow once, deny, or cancel turn"],
   ["claude.plan_mode", "stable", "Read-only planning (active)"],
-  ["claude.native_actions", "unavailable", "Deferred beyond M1"],
+  ["claude.agent_sdk_write", "stable", "Sandboxed build with temporary approvals"],
   ["codex.app_server", "preview", "Streaming + lane approvals"],
-  ["codex.native_actions", "unavailable", "Deferred beyond M1"],
+  ["codex.workspace_write", "preview", "Workspace-write build with network off"],
 ] as const;
 
 function statusColor(status: LaneSnapshot["status"]): string {
@@ -51,28 +53,32 @@ function Lane({ lane, focused, height }: { lane: LaneSnapshot; focused: boolean;
 
 function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number }) {
   const git = snapshot.git;
+  const evidence = git.evidence.map(({ path, classification }) => `[${classification}] ${path}`);
   const body = git.error
     ? git.error
     : git.files.length === 0
       ? "Working tree clean"
-      : [git.files.join("\n"), git.diffStat || tailLines(git.diff, Math.max(2, height - 7))]
+      : [evidence.join("\n"), git.diffStat || tailLines(git.diff, Math.max(2, height - 7))]
           .filter(Boolean)
           .join("\n\n");
   return (
     <Box borderStyle="round" borderColor="magenta" flexDirection="column" paddingX={1} height={height} flexGrow={1}>
       <Text bold>EVIDENCE · READ ONLY</Text>
-      <Text dimColor>{git.branch} · {git.dirty ? "DIRTY" : "CLEAN"}</Text>
+      <Text dimColor>{git.branch} · {git.dirty ? "DIRTY" : "CLEAN"} · baseline {git.baselineFingerprint?.slice(0, 8) ?? "none"}</Text>
       <Text wrap="wrap">{tailLines(body, Math.max(2, height - 4))}</Text>
     </Box>
   );
 }
 
-function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex }: {
+function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
   modelProvider: ProviderId;
   modelDraft: string;
   roleIndex: number;
+  writerProvider: ProviderId;
+  writerConfirm: boolean;
+  approvalIndex: number;
 }) {
   if (overlay === "model") {
     return (
@@ -105,18 +111,51 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex 
       </Box>
     );
   }
+  if (overlay === "writer") {
+    const lane = snapshot.lanes[writerProvider];
+    const visibleDirtyFiles = snapshot.git.files.slice(0, 5);
+    const remainingDirtyFiles = snapshot.git.files.length - visibleDirtyFiles.length;
+    return (
+      <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
+        <Text bold>ENTER BUILD · SINGLE WRITER · {writerConfirm ? "CONFIRM" : "SELECT"}</Text>
+        <Text>writer: <Text color="cyan">{writerProvider.toUpperCase()}</Text> · model: {lane.effectiveModel}</Text>
+        <Text>root: {snapshot.git.root || "not a Git repository"}</Text>
+        <Text>dirty: {snapshot.git.dirty ? `${visibleDirtyFiles.join(", ")}${remainingDirtyFiles > 0 ? ` (+${remainingDirtyFiles} more)` : ""}` : "clean"}</Text>
+        <Text color="yellow">effect: workspace-write inside root · network off · peer remains read-only</Text>
+        <Text dimColor>{writerConfirm ? "Enter grant lease · Esc close" : "Tab writer · Enter review confirmation · Esc close"}</Text>
+      </Box>
+    );
+  }
+  if (overlay === "approval") {
+    const approval = snapshot.approvals[approvalIndex] ?? snapshot.approvals[0];
+    return (
+      <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
+        <Text bold>APPROVAL INBOX · {snapshot.approvals.length} PENDING</Text>
+        {approval ? (
+          <>
+            <Text>{approval.provider.toUpperCase()} · {approval.tool}</Text>
+            <Text>command: {approval.command ?? "n/a"}</Text>
+            <Text>cwd/path: {approval.paths.length ? approval.paths.join(", ") : approval.path ?? approval.cwd ?? "unknown"}</Text>
+            <Text>reason: {approval.reason ?? "not provided"}</Text>
+            <Text color={approval.outsideWorkspace ? "red" : "gray"}>boundary: {approval.outsideWorkspace ? "OUTSIDE WORKSPACE" : "inside/unknown"} · network {approval.networkEffect}</Text>
+            <Text dimColor>↑/↓ request · A allow once · D deny · X cancel turn · Esc close</Text>
+          </>
+        ) : <Text>No pending approvals. Esc close.</Text>}
+      </Box>
+    );
+  }
   return (
     <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
       <Text bold>ACTION PALETTE · capability aware</Text>
       {ACTIONS.map(([id, stability, description]) => (
         <Text key={id}>{id} <Text color={stability === "stable" ? "green" : "gray"}>[{stability}]</Text> · {description}</Text>
       ))}
-      <Text dimColor>M1 is informational; Esc/Ctrl+P close</Text>
+      <Text dimColor>Esc/Ctrl+P close</Text>
     </Box>
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0 }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0 }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
@@ -125,6 +164,9 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   modelProvider?: ProviderId;
   modelDraft?: string;
   roleIndex?: number;
+  writerProvider?: ProviderId;
+  writerConfirm?: boolean;
+  approvalIndex?: number;
 }) {
   const layout = selectLayout(columns);
   const height = contentHeight(rows);
@@ -138,10 +180,10 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
     <Box flexDirection="column">
       <Box justifyContent="space-between">
         <Text bold color="cyan">SPLITLANE</Text>
-        <Text>mode <Text color="green">COMPARE</Text> · writer <Text color="gray">NONE</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
+        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text> · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} /> : (
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} /> : (
         <Box flexDirection={outerDirection} gap={1}>
           <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
             {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} />)}
@@ -153,7 +195,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
         <Text color="cyan">› </Text><Text>{prompt || "Type a prompt…"}</Text>
       </Box>
       {snapshot.notice ? <Text color="yellow">{snapshot.notice}</Text> : null}
-      <Text dimColor>Enter send · ^R target · ⌥1/2 focus · ^X cancel · ^I inspector · ^M model · ^P actions · ^O roles · ^D diagnostics · ^Q quit</Text>
+      <Text dimColor>Enter send · ^R target · ^B build · ^W revoke · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^M model · ^P actions · ^O roles · ^D diagnostics · ^Q quit</Text>
     </Box>
   );
 }
@@ -168,6 +210,16 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   const [modelDraft, setModelDraft] = useState("");
   const [roleIndex, setRoleIndex] = useState(0);
   const [roleProvider, setRoleProvider] = useState<ProviderId>("claude");
+  const [writerProvider, setWriterProvider] = useState<ProviderId>(snapshot.focusedProvider);
+  const [writerConfirm, setWriterConfirm] = useState(false);
+  const [approvalIndex, setApprovalIndex] = useState(0);
+
+  useEffect(() => {
+    if (snapshot.approvals.length > 0) {
+      setApprovalIndex((index) => Math.min(index, snapshot.approvals.length - 1));
+      setOverlay("approval");
+    } else if (overlay === "approval") setOverlay(null);
+  }, [snapshot.approvals.length]);
 
   useInput((input, key) => {
     if (key.ctrl && input === "q") {
@@ -176,6 +228,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     }
     if (key.escape) {
       setOverlay(null);
+      setWriterConfirm(false);
       return;
     }
     if (overlay === "model") {
@@ -208,11 +261,45 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       if (key.ctrl && input === "d") setOverlay(null);
       return;
     }
+    if (overlay === "writer") {
+      if (key.tab && !writerConfirm) setWriterProvider((provider) => provider === "claude" ? "codex" : "claude");
+      else if (key.return && !writerConfirm) setWriterConfirm(true);
+      else if (key.return) {
+        void orchestrator.promoteWriter(writerProvider, snapshot.git.dirty).then((promoted) => {
+          if (promoted) {
+            setOverlay(null);
+            setWriterConfirm(false);
+          }
+        });
+      }
+      return;
+    }
+    if (overlay === "approval") {
+      if (key.upArrow) setApprovalIndex((index) => (index - 1 + Math.max(1, snapshot.approvals.length)) % Math.max(1, snapshot.approvals.length));
+      else if (key.downArrow) setApprovalIndex((index) => (index + 1) % Math.max(1, snapshot.approvals.length));
+      else {
+        const approval = snapshot.approvals[approvalIndex] ?? snapshot.approvals[0];
+        if (approval && input.toLowerCase() === "a") orchestrator.resolveApproval(approval.id, "allow_once");
+        else if (approval && input.toLowerCase() === "d") orchestrator.resolveApproval(approval.id, "deny");
+        else if (approval && input.toLowerCase() === "x") orchestrator.resolveApproval(approval.id, "cancel_turn");
+      }
+      return;
+    }
     if (key.meta && input === "1") orchestrator.focus("claude");
     else if (key.meta && input === "2") orchestrator.focus("codex");
     else if (key.ctrl && input === "r") orchestrator.cycleTarget();
     else if (key.ctrl && input === "x") void orchestrator.cancel(snapshot.focusedProvider);
     else if (key.ctrl && input === "i") orchestrator.toggleInspector();
+    else if (key.ctrl && input === "b") {
+      if (snapshot.mode === "build") return;
+      setWriterProvider(snapshot.focusedProvider);
+      setWriterConfirm(false);
+      setOverlay("writer");
+    } else if (key.ctrl && input === "w") void orchestrator.revokeWriter();
+    else if (key.ctrl && input === "a") {
+      setApprovalIndex(0);
+      setOverlay("approval");
+    }
     else if (key.ctrl && input === "m") {
       setModelProvider(snapshot.focusedProvider);
       setModelDraft(snapshot.lanes[snapshot.focusedProvider].requestedModel);
@@ -228,5 +315,5 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} />;
 }

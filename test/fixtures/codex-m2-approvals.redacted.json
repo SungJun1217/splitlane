@@ -1,0 +1,32 @@
+{
+  "fixture_version": 1,
+  "captured_from": "codex-cli 0.145.0 generated stable app-server schema",
+  "model_turn_started": false,
+  "requests": [
+    {
+      "id": 41,
+      "method": "item/commandExecution/requestApproval",
+      "params": {
+        "threadId": "<opaque-id>",
+        "turnId": "<opaque-id>",
+        "itemId": "<opaque-id>",
+        "startedAtMs": 0,
+        "reason": "write generated output",
+        "command": "touch output.txt",
+        "cwd": "<project-root>"
+      }
+    },
+    {
+      "id": "file-42",
+      "method": "item/fileChange/requestApproval",
+      "params": {
+        "threadId": "<opaque-id>",
+        "turnId": "<opaque-id>",
+        "itemId": "<opaque-id>",
+        "startedAtMs": 0,
+        "reason": "apply patch",
+        "grantRoot": "<project-root>"
+      }
+    }
+  ]
+}

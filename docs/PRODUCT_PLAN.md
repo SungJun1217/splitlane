@@ -911,6 +911,10 @@ process after shutdown. Redacted evidence is retained in
 
 ### M2 — Single-writer build
 
+Implementation decisions in `docs/M2_SINGLE_WRITER_DECISIONS.md` were approved
+on 2026-07-26: two-step writer promotion, one writer plus one read-only peer for
+build broadcasts, and temporary allow/deny/cancel approval choices only.
+
 - Writer promotion confirmation.
 - Git fingerprint and changed-file summary.
 - Approval inbox.
@@ -919,6 +923,13 @@ process after shutdown. Redacted evidence is retained in
 - Debounced changed-file index and per-file diff refresh.
 
 Exit gate: no path allows both providers to write to the same tree concurrently.
+
+Offline implementation checkpoint: **passed on 2026-07-26**. Fifty-six
+credential-free tests cover the single-writer race, read-only peer, temporary
+approval decisions, fail-closed cancellation/exit, workspace and network
+denial, and Git evidence classification. Type checking, both Bun build modes,
+Linux x86_64 cross-compilation, and a no-model-turn TUI promote/revoke smoke
+test also passed. The disposable-repository live approval gate remains opt-in.
 
 ### M3 — Reviewer handoff
 
@@ -1039,7 +1050,8 @@ v0.1 is ready only when:
 ## 21. Decisions still requiring user approval
 
 1. Product thesis: approve `route or compare → approve handoff → build → two-lens review` as the primary flow.
-2. v0.1 workspace: approve current-tree single writer, with worktrees deferred to M5.
+2. v0.1 workspace: **approved on 2026-07-26** — use one current-tree writer
+   lease and defer isolated worktrees to M5.
 3. Transport fallback: decide whether Claude build mode should be withheld if supported approval callbacks cannot be proven, rather than falling back to PTY scraping.
 4. Technology: approved TypeScript/Bun proposal with Claude Agent SDK and Codex
    app-server as separate provider transports. The macOS arm64 and Linux x86_64

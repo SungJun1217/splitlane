@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AsyncQueue } from "../core/async-queue.ts";
 import { event } from "../core/events.ts";
 import type {
+  ApprovalDecision,
   NormalizedEvent,
   ProviderAdapter,
   ProviderProbe,
@@ -13,6 +14,7 @@ import type {
 } from "../domain.ts";
 import { runCommand } from "../process/child.ts";
 import { sanitizeIdentifier, sanitizeTerminalText } from "../terminal/sanitize.ts";
+import { isAuthenticWriterLease } from "../workspace/guard.ts";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -33,6 +35,23 @@ export interface ParsedClaudeMessage {
   effectiveModel?: string;
   sawTextDelta: boolean;
   events: Array<{ kind: NormalizedEvent["kind"]; payload: Record<string, unknown> }>;
+}
+
+export function claudePermissionResult(decision: ApprovalDecision, toolUseID: string) {
+  if (decision === "allow_once") {
+    return {
+      behavior: "allow" as const,
+      toolUseID,
+      decisionClassification: "user_temporary" as const,
+    };
+  }
+  return {
+    behavior: "deny" as const,
+    message: decision === "cancel_turn" ? "User cancelled the Splitlane turn." : "User denied this operation.",
+    interrupt: decision === "cancel_turn",
+    toolUseID,
+    decisionClassification: "user_reject" as const,
+  };
 }
 
 export function parseClaudeMessage(rawMessage: unknown, sawTextDelta: boolean): ParsedClaudeMessage {
@@ -114,6 +133,12 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   async startTurn(session: SessionHandle, prompt: string, options: TurnOptions): Promise<ProviderTurn> {
+    if (options.workspaceAccess === "workspace_write") {
+      const lease = options.writerLease;
+      if (!isAuthenticWriterLease(lease, this.provider, options.projectRoot) || options.projectRoot !== this.#projectRoot) {
+        throw new Error("Claude workspace-write rejected: missing matching writer lease");
+      }
+    }
     const turnId = randomUUID();
     const queue = new AsyncQueue<NormalizedEvent>();
     const abortController = new AbortController();
@@ -136,29 +161,94 @@ export class ClaudeAdapter implements ProviderAdapter {
     const resumed = Boolean(session.id);
     let queryStream: ReturnType<typeof query> | null = null;
     try {
+      const writable = options.workspaceAccess === "workspace_write";
       const sdkOptions: Options = {
         cwd: this.#projectRoot,
         abortController,
         includePartialMessages: true,
-        permissionMode: "plan" as const,
+        permissionMode: writable ? "default" as const : "plan" as const,
         settingSources: ["user", "project", "local"],
-        tools: ["Read", "Glob", "Grep", "Bash"],
+        tools: writable
+          ? ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit"]
+          : ["Read", "Glob", "Grep", "Bash"],
+        ...(writable
+          ? {
+              sandbox: {
+                enabled: true,
+                failIfUnavailable: true,
+                autoAllowBashIfSandboxed: false,
+                allowUnsandboxedCommands: false,
+                network: { allowedDomains: [], deniedDomains: ["*"], strictAllowlist: true },
+                filesystem: { allowWrite: [this.#projectRoot] },
+              },
+              settings: {
+                permissions: {
+                  deny: ["WebFetch", "WebSearch"],
+                  ask: ["Bash(*)", "Write(*)", "Edit(*)", "NotebookEdit(*)"],
+                  defaultMode: "default" as const,
+                  disableBypassPermissionsMode: "disable" as const,
+                },
+              },
+            }
+          : {}),
         ...(options.requestedModel === "default" ? {} : { model: options.requestedModel }),
         ...(session.id ? { resume: session.id } : {}),
-        canUseTool: async (toolName: string, input: UnknownRecord) => {
+        canUseTool: async (toolName: string, input: UnknownRecord, permission) => {
+          const path = typeof permission.blockedPath === "string"
+            ? permission.blockedPath
+            : typeof input.file_path === "string"
+              ? input.file_path
+              : typeof input.path === "string"
+                ? input.path
+                : null;
+          const command = typeof input.command === "string" ? input.command : null;
           queue.push(event(this.provider, "approval.requested", {
             sessionId: providerSessionId,
             turnId,
-            payload: { tool: sanitizeTerminalText(toolName), input_keys: Object.keys(input) },
+            payload: {
+              request_id: sanitizeIdentifier(permission.requestId),
+              tool: sanitizeTerminalText(toolName),
+              command: command ? sanitizeTerminalText(command) : null,
+              path: path ? sanitizeTerminalText(path) : null,
+            },
             rawVersion: this.#version,
           }));
+          const permissionReason = sanitizeTerminalText(
+            permission.title ?? permission.decisionReason ?? permission.description,
+          );
+          const networkRequested = /\bnetwork\b|\binternet\b|\bweb\b/i.test(permissionReason) ||
+            toolName === "WebFetch" || toolName === "WebSearch";
+          const approvalKind = toolName === "Bash"
+            ? "command"
+            : ["Write", "Edit", "NotebookEdit"].includes(toolName)
+              ? "file_change"
+              : "tool";
+          const decision = await options.requestApproval({
+            providerRequestId: sanitizeIdentifier(permission.requestId) || randomUUID(),
+            kind: approvalKind,
+            tool: sanitizeTerminalText(permission.displayName ?? toolName),
+            command: command ? sanitizeTerminalText(command) : null,
+            cwd: this.#projectRoot,
+            path: path ? sanitizeTerminalText(path) : null,
+            paths: path ? [sanitizeTerminalText(path)] : [],
+            reason: permissionReason || null,
+            networkEffect: networkRequested ? "requested" : "off",
+          });
           queue.push(event(this.provider, "approval.resolved", {
             sessionId: providerSessionId,
             turnId,
-            payload: { decision: "deny", reason: "compare mode is read-only" },
+            payload: { decision },
             rawVersion: this.#version,
           }));
-          return { behavior: "deny" as const, message: "Splitlane compare mode is read-only." };
+          if (decision === "allow_once" && approvalKind === "file_change" && path) {
+            queue.push(event(this.provider, "file.changed", {
+              sessionId: providerSessionId,
+              turnId,
+              payload: { path: sanitizeTerminalText(path), hint: true },
+              rawVersion: this.#version,
+            }));
+          }
+          return claudePermissionResult(decision, permission.toolUseID);
         },
       };
 

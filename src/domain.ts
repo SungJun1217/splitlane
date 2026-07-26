@@ -1,7 +1,9 @@
 export type ProviderId = "claude" | "codex";
 export type PromptTarget = "both" | ProviderId;
-export type WorkflowMode = "compare";
+export type WorkflowMode = "compare" | "build";
 export type CapabilityStability = "stable" | "preview" | "experimental";
+export type WorkspaceAccess = "read_only" | "workspace_write";
+export type ApprovalDecision = "allow_once" | "deny" | "cancel_turn";
 
 export type EventKind =
   | "session.started"
@@ -55,8 +57,40 @@ export interface SessionOptions {
   requestedModel: string;
 }
 
+export interface WriterLease {
+  id: string;
+  provider: ProviderId;
+  projectRoot: string;
+  grantedAt: string;
+  baselineFingerprint: string;
+}
+
+export interface ProviderApprovalRequest {
+  providerRequestId: string;
+  kind: "command" | "file_change" | "tool" | "permissions";
+  tool: string;
+  command: string | null;
+  cwd: string | null;
+  path: string | null;
+  paths: readonly string[];
+  reason: string | null;
+  networkEffect: "off" | "requested" | "unknown";
+}
+
+export interface PendingApproval extends ProviderApprovalRequest {
+  id: string;
+  provider: ProviderId;
+  turnId: string;
+  requestedAt: string;
+  outsideWorkspace: boolean;
+}
+
 export interface TurnOptions {
   requestedModel: string;
+  projectRoot: string;
+  workspaceAccess: WorkspaceAccess;
+  writerLease: WriterLease | null;
+  requestApproval(request: ProviderApprovalRequest): Promise<ApprovalDecision>;
 }
 
 export interface ProviderTurn {
@@ -110,6 +144,15 @@ export interface GitSnapshot {
   diffStat: string;
   diff: string;
   error: string | null;
+  baselineFingerprint: string | null;
+  evidence: readonly GitFileEvidence[];
+}
+
+export type GitChangeClassification = "pre-existing" | "writer-hinted" | "unknown/external";
+
+export interface GitFileEvidence {
+  path: string;
+  classification: GitChangeClassification;
 }
 
 export type RoleId =
@@ -124,13 +167,16 @@ export type RoleProfile = Record<RoleId, ProviderId>;
 
 export interface AppSnapshot {
   mode: WorkflowMode;
-  writer: null;
+  writer: ProviderId | null;
+  writerLease: WriterLease | null;
+  writerRevoking: boolean;
   target: PromptTarget;
   focusedProvider: ProviderId;
   inspectorVisible: boolean;
   lanes: Record<ProviderId, LaneSnapshot>;
   git: GitSnapshot;
   roles: RoleProfile;
+  approvals: readonly PendingApproval[];
   diagnostics: readonly string[];
   notice: string | null;
 }

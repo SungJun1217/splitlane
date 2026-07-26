@@ -13,7 +13,7 @@ export interface CommandResult {
 export function runCommand(
   command: string,
   args: readonly string[],
-  options: { cwd?: string; timeoutMs?: number; maxOutput?: number } = {},
+  options: { cwd?: string; timeoutMs?: number; maxOutput?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<CommandResult> {
   const timeoutMs = options.timeoutMs ?? 5_000;
   const maxOutput = options.maxOutput ?? 128_000;
@@ -24,6 +24,7 @@ export function runCommand(
     let settled = false;
     const child = spawn(command, [...args], {
       cwd: options.cwd,
+      env: options.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const retain = (current: string, chunk: Buffer): string =>

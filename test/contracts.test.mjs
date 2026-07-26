@@ -68,6 +68,7 @@ test("live compatibility fixtures contain no raw provider session IDs", async ()
     "test/fixtures/claude-sdk-stream.redacted.json",
     "test/fixtures/codex-live-compatibility.redacted.json",
     "test/fixtures/codex-app-server-stream.redacted.json",
+    "test/fixtures/codex-m2-approvals.redacted.json",
     "test/fixtures/m1-live-gate-2026-07-26.redacted.json",
   ]) {
     const fixture = await load(file);
