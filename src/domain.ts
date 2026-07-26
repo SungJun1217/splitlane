@@ -1,6 +1,7 @@
 export type ProviderId = "claude" | "codex";
 export type PromptTarget = "both" | ProviderId;
 export type WorkflowMode = "compare" | "build" | "review";
+export type ModelSource = "request" | "project" | "user" | "provider_default";
 export type CapabilityStability = "stable" | "preview" | "experimental";
 export type WorkspaceAccess = "read_only" | "workspace_write";
 export type ApprovalDecision = "allow_once" | "deny" | "cancel_turn";
@@ -136,6 +137,7 @@ export interface LaneSnapshot {
   status: LaneStatus;
   requestedModel: string;
   effectiveModel: string;
+  modelSource: ModelSource;
   sessionId: string | null;
   turnId: string | null;
   output: string;
@@ -161,6 +163,31 @@ export interface PromptEnvelope {
   envelopeId: string;
   createdAt: string;
   prompt: string;
+}
+
+export type QueueItemStatus = "queued" | "needs_confirmation";
+
+export interface QueueItem {
+  id: string;
+  target: PromptTarget;
+  providers: readonly ProviderId[];
+  envelope: PromptEnvelope;
+  models: Readonly<Record<ProviderId, string>>;
+  mode: Exclude<WorkflowMode, "review">;
+  writer: ProviderId | null;
+  writerLeaseId: string | null;
+  status: QueueItemStatus;
+  createdAt: string;
+}
+
+export interface ConfigurationSnapshot {
+  userPath: string;
+  projectPath: string;
+  loadedUser: boolean;
+  loadedProject: boolean;
+  allowPreview: boolean;
+  showTools: "collapsed" | "expanded";
+  restoreSessions: "ask" | "always" | "never";
 }
 
 export interface GitSnapshot {
@@ -266,6 +293,10 @@ export interface AppSnapshot {
   roles: RoleProfile;
   approvals: readonly PendingApproval[];
   review: ReviewSnapshot | null;
+  queue: readonly QueueItem[];
+  queueOffer: QueueItem | null;
+  queueLimit: number;
+  configuration: ConfigurationSnapshot;
   diagnostics: readonly string[];
   notice: string | null;
 }

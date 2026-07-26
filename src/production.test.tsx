@@ -1,5 +1,5 @@
 import React from "react";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -33,6 +33,7 @@ import { WorkspaceGuard, isPathInsideWorkspace } from "./workspace/guard.ts";
 import { captureReviewPatch, createReviewEnvelope, REVIEW_PATCH_LIMIT } from "./review/envelope.ts";
 import { FINDINGS_END, FINDINGS_START, parseReviewFindings } from "./review/findings.ts";
 import { loadFindingPreview } from "./review/preview.ts";
+import { configPaths, discoverProjectRoot, loadConfig, parseConfig } from "./config/config.ts";
 
 type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
 
@@ -223,6 +224,66 @@ describe("production orchestrator", () => {
     await orchestrator.close();
   });
 
+  test("busy broadcast queues one atomic group and waits for both lanes", async () => {
+    const { orchestrator, claude, codex } = setup("hold", "hold");
+    await orchestrator.initialize();
+    await orchestrator.dispatch("active pair");
+    await waitFor(() => claude.prompts.length === 1 && codex.prompts.length === 1);
+    expect(await orchestrator.dispatch("queued pair")).toBe(false);
+    expect(orchestrator.getSnapshot().queueOffer?.providers).toEqual(["claude", "codex"]);
+    expect(orchestrator.confirmQueueOffer()).toBe(true);
+    await orchestrator.cancel("claude");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "CANCELLED");
+    expect(claude.prompts).toHaveLength(1);
+    expect(codex.prompts).toHaveLength(1);
+    await orchestrator.cancel("codex");
+    await waitFor(() => claude.prompts.length === 2 && codex.prompts.length === 2);
+    expect(claude.prompts[1]).toBe("queued pair");
+    expect(codex.prompts[1]).toBe("queued pair");
+    await orchestrator.close();
+  });
+
+  test("queued authority changes require confirmation and queued models stay frozen", async () => {
+    const { orchestrator, claude } = setup("hold", "complete");
+    await orchestrator.initialize();
+    expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+    orchestrator.setTarget("claude");
+    orchestrator.setModel("claude", "model-a");
+    expect(await orchestrator.dispatch("active writer")).toBe(true);
+    expect(await orchestrator.dispatch("frozen writer request")).toBe(false);
+    expect(orchestrator.confirmQueueOffer()).toBe(true);
+    orchestrator.setModel("claude", "model-b");
+    await orchestrator.revokeWriter();
+    await waitFor(() => orchestrator.getSnapshot().queue[0]?.status === "needs_confirmation");
+    expect(claude.prompts).toEqual(["active writer"]);
+    const queued = orchestrator.getSnapshot().queue[0];
+    expect(queued?.models.claude).toBe("model-a");
+    expect(queued && orchestrator.confirmQueued(queued.id)).toBe(true);
+    await waitFor(() => claude.prompts.length === 2);
+    expect(claude.sessions.at(-1)?.requestedModel).toBe("model-a");
+    expect(orchestrator.getSnapshot().lanes.claude.requestedModel).toBe("model-b");
+    await orchestrator.close();
+  });
+
+  test("queue capacity is enforced per lane and items remain removable", async () => {
+    const { orchestrator } = setup("hold", "complete");
+    await orchestrator.initialize();
+    orchestrator.setTarget("claude");
+    await orchestrator.dispatch("active");
+    for (let index = 0; index < 10; index += 1) {
+      await orchestrator.dispatch(`queued ${index}`);
+      expect(orchestrator.confirmQueueOffer()).toBe(true);
+    }
+    await orchestrator.dispatch("overflow");
+    expect(orchestrator.confirmQueueOffer()).toBe(false);
+    const first = orchestrator.getSnapshot().queue[0];
+    expect(first && orchestrator.removeQueued(first.id)).toBe(true);
+    expect(orchestrator.confirmQueueOffer()).toBe(true);
+    expect(orchestrator.getSnapshot().queue).toHaveLength(10);
+    await orchestrator.close();
+    expect(orchestrator.getSnapshot().queue).toHaveLength(0);
+  });
+
   test("one lane can fail without cancelling the other", async () => {
     const { orchestrator } = setup("fail", "complete");
     await orchestrator.initialize();
@@ -263,6 +324,9 @@ describe("production orchestrator", () => {
     expect(claude.approvalDecisions).toEqual(["allow_once"]);
     orchestrator.setModel("claude", "default");
     expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBeNull();
+    orchestrator.setModel("claude", "unsafe\nmodel");
+    expect(orchestrator.getSnapshot().lanes.claude.requestedModel).toBe("default");
+    expect(orchestrator.getSnapshot().notice).toContain("one line");
     await orchestrator.close();
   });
 
@@ -437,6 +501,42 @@ describe("production orchestrator", () => {
   });
 });
 
+describe("configuration", () => {
+  test("loads project over user config with documented paths and strict validation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-config-"));
+    const home = join(root, "home");
+    const project = join(root, "repo");
+    const nested = join(project, "src", "nested");
+    const paths = configPaths(project, { platform: "linux", home, env: {} });
+    try {
+      await mkdir(join(project, ".git"), { recursive: true });
+      await mkdir(nested, { recursive: true });
+      await mkdir(join(home, ".config", "splitlane"), { recursive: true });
+      await mkdir(join(project, ".splitlane"), { recursive: true });
+      await writeFile(paths.user, JSON.stringify({ version: 1, providers: { claude: { model: "user-claude" }, codex: { model: "user-codex" } }, queue: { limit: 4 }, ui: { restore_sessions: "never" } }));
+      await writeFile(paths.project, JSON.stringify({ version: 1, providers: { codex: { model: "project-codex" } }, capabilities: { allow_preview: false } }));
+      expect(await discoverProjectRoot(nested)).toBe(project);
+      const config = await loadConfig(project, { platform: "linux", home, env: {} });
+      expect(config.providers.claude).toEqual({ model: "user-claude", source: "user" });
+      expect(config.providers.codex).toEqual({ model: "project-codex", source: "project" });
+      expect(config.queue.limit).toBe(4);
+      expect(config.ui.restoreSessions).toBe("never");
+      expect(config.capabilities.allowPreview).toBe(false);
+      expect(config.loaded).toEqual({ user: true, project: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects unknown keys, invalid limits, and unsafe model IDs with actionable paths", () => {
+    expect(() => parseConfig({ version: 1, workspace: { mode: "build" } }, "project.json")).toThrow("project.json.workspace is unknown");
+    expect(() => parseConfig({ version: 1, queue: { limit: 11 } }, "project.json")).toThrow("project.json.queue.limit");
+    expect(() => parseConfig({ version: 1, providers: { claude: { model: "bad\nmodel" } } }, "project.json")).toThrow("unsafe control character");
+    expect(() => parseConfig({ version: 2 }, "project.json")).toThrow("project.json.version must be 1");
+    expect(configPaths("/repo", { platform: "darwin", home: "/Users/test", env: {} }).user).toBe("/Users/test/Library/Application Support/Splitlane/config.json");
+  });
+});
+
 describe("terminal rendering", () => {
   test("sanitizes terminal escape injection and bounds output", () => {
     expect(sanitizeTerminalText("ok\u001b]2;owned\u0007\u001b[31m!\u001b[0m")).toBe("ok!");
@@ -492,6 +592,7 @@ describe("terminal rendering", () => {
     expect(output).toContain("한글 검사");
     expect(output).toContain("COMPARE");
     expect(output).toContain("writer NONE");
+    expect(output).not.toContain("FOCUSEmode");
     expect(output).not.toContain("CODEX");
 
     const activity = renderToString(
@@ -507,6 +608,36 @@ describe("terminal rendering", () => {
       { columns: 90 },
     );
     expect(help).toContain("PgUp/PgDn scroll");
+
+    const queuedSnapshot: AppSnapshot = {
+      ...snapshot,
+      queue: [{
+        id: "queue-12345678",
+        target: "both",
+        providers: ["claude", "codex"],
+        envelope: { envelopeId: "envelope", createdAt: new Date(0).toISOString(), prompt: "한글 원자 큐" },
+        models: { claude: "default", codex: "gpt-exact" },
+        mode: "compare",
+        writer: null,
+        writerLeaseId: null,
+        status: "needs_confirmation",
+        createdAt: new Date(0).toISOString(),
+      }],
+    };
+    const queue = renderToString(
+      <SplitlaneView snapshot={queuedSnapshot} prompt="" columns={90} rows={30} overlay="queue" />,
+      { columns: 90 },
+    );
+    expect(queue).toContain("REQUEST QUEUE");
+    expect(queue).toContain("needs_confirmation");
+    expect(queue).toContain("한글 원자 큐");
+
+    const configuration = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={90} rows={30} overlay="configuration" />,
+      { columns: 90 },
+    );
+    expect(configuration).toContain("STRICT JSON");
+    expect(configuration).toContain(".splitlane/config.json");
   });
 
   test("renders writer confirmation and approval safety details", () => {

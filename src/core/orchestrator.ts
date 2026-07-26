@@ -13,6 +13,7 @@ import type {
   ProviderApprovalRequest,
   ProviderAdapter,
   ProviderId,
+  QueueItem,
   RoleId,
   RoleProfile,
   ReviewMechanism,
@@ -21,6 +22,7 @@ import type {
   TurnOptions,
   WriterLease,
 } from "../domain.ts";
+import type { EffectiveConfig } from "../config/config.ts";
 import { GitObserver } from "../git/observer.ts";
 import { appendBounded, sanitizeTerminalText } from "../terminal/sanitize.ts";
 import { isPathInsideWorkspace, WorkspaceGuard } from "../workspace/guard.ts";
@@ -39,11 +41,12 @@ const M1_PREVIEW_ROLES: RoleProfile = {
   correctness_reviewer: "codex",
 };
 
-const blankLane = (provider: ProviderId): LaneSnapshot => ({
+const blankLane = (provider: ProviderId, config?: EffectiveConfig): LaneSnapshot => ({
   provider,
   status: "READY",
-  requestedModel: "default",
-  effectiveModel: "default",
+  requestedModel: config?.providers[provider].model ?? "default",
+  effectiveModel: config?.providers[provider].model ?? "default",
+  modelSource: config?.providers[provider].source ?? "provider_default",
   sessionId: null,
   turnId: null,
   output: "",
@@ -67,14 +70,18 @@ export class CompareOrchestrator {
   #promotionPending = false;
   #reviewPending = false;
   #lastWriterPrompt: string | null = null;
+  #queueScheduling = false;
+  readonly #allowPreview: boolean;
   #snapshot: AppSnapshot;
 
   constructor(
     readonly projectRoot: string,
     readonly adapters: Record<ProviderId, ProviderAdapter>,
+    config?: EffectiveConfig,
   ) {
     this.#git = new GitObserver(projectRoot);
     this.#workspace = new WorkspaceGuard(projectRoot);
+    this.#allowPreview = config?.capabilities.allowPreview ?? true;
     this.#snapshot = {
       mode: "compare",
       writer: null,
@@ -82,12 +89,24 @@ export class CompareOrchestrator {
       writerRevoking: false,
       target: "both",
       focusedProvider: "claude",
-      inspectorVisible: true,
-      lanes: { claude: blankLane("claude"), codex: blankLane("codex") },
+      inspectorVisible: config?.ui.inspector ?? true,
+      lanes: { claude: blankLane("claude", config), codex: blankLane("codex", config) },
       git: this.#git.snapshot,
-      roles: { ...M1_PREVIEW_ROLES },
+      roles: { ...(config?.roles ?? M1_PREVIEW_ROLES) },
       approvals: [],
       review: null,
+      queue: [],
+      queueOffer: null,
+      queueLimit: config?.queue.limit ?? 10,
+      configuration: {
+        userPath: config?.paths.user ?? "not loaded",
+        projectPath: config?.paths.project ?? `${projectRoot}/.splitlane/config.json`,
+        loadedUser: config?.loaded.user ?? false,
+        loadedProject: config?.loaded.project ?? false,
+        allowPreview: this.#allowPreview,
+        showTools: config?.ui.showTools ?? "collapsed",
+        restoreSessions: config?.ui.restoreSessions ?? "ask",
+      },
       diagnostics: [],
       notice: null,
     };
@@ -224,13 +243,97 @@ export class CompareOrchestrator {
 
   setModel(provider: ProviderId, model: string): void {
     const requestedModel = model.trim() || "default";
+    if (requestedModel.length > 256 || /[\r\n\0]/.test(requestedModel)) {
+      this.#patch({ notice: `${provider} model ID must be one line and at most 256 characters.` });
+      return;
+    }
     this.#sessions.delete(provider);
     this.#patchLane(provider, {
       requestedModel,
       effectiveModel: requestedModel,
+      modelSource: "request",
       sessionId: null,
     });
     this.#patch({ notice: `${provider} model set for next request; provider session reset.` });
+  }
+
+  #selectedProviders(target: PromptTarget): readonly ProviderId[] {
+    return target === "both" ? ["claude", "codex"] : [target];
+  }
+
+  #freezeQueueItem(prompt: string, target: PromptTarget = this.#snapshot.target): QueueItem {
+    const createdAt = new Date().toISOString();
+    return Object.freeze({
+      id: randomUUID(),
+      target,
+      providers: Object.freeze([...this.#selectedProviders(target)]),
+      envelope: Object.freeze({ envelopeId: randomUUID(), createdAt, prompt }),
+      models: Object.freeze({
+        claude: this.#snapshot.lanes.claude.requestedModel,
+        codex: this.#snapshot.lanes.codex.requestedModel,
+      }),
+      mode: this.#snapshot.mode as Exclude<AppSnapshot["mode"], "review">,
+      writer: this.#snapshot.writer,
+      writerLeaseId: this.#snapshot.writerLease?.id ?? null,
+      status: "queued" as const,
+      createdAt,
+    });
+  }
+
+  #queueDepth(provider: ProviderId): number {
+    return this.#snapshot.queue.filter((item) => item.providers.includes(provider)).length;
+  }
+
+  confirmQueueOffer(): boolean {
+    const offer = this.#snapshot.queueOffer;
+    if (!offer) return false;
+    const full = offer.providers.find((provider) => this.#queueDepth(provider) >= this.#snapshot.queueLimit);
+    if (full) {
+      this.#patch({ notice: `${full} queue is full (${this.#snapshot.queueLimit}). Remove an item first.` });
+      return false;
+    }
+    this.#patch({
+      queue: [...this.#snapshot.queue, offer],
+      queueOffer: null,
+      notice: `${offer.target} request queued · ${offer.id.slice(0, 8)} · authority frozen.`,
+    });
+    void this.#scheduleQueue();
+    return true;
+  }
+
+  cancelQueueOffer(): void {
+    if (!this.#snapshot.queueOffer) return;
+    this.#patch({ queueOffer: null, notice: "Pending queue request discarded; nothing was sent." });
+  }
+
+  removeQueued(id: string): boolean {
+    const item = this.#snapshot.queue.find((candidate) => candidate.id === id);
+    if (!item) return false;
+    this.#patch({ queue: this.#snapshot.queue.filter((candidate) => candidate.id !== id), notice: `Queued request ${id.slice(0, 8)} removed.` });
+    void this.#scheduleQueue();
+    return true;
+  }
+
+  confirmQueued(id: string): boolean {
+    const existing = this.#snapshot.queue.find((item) => item.id === id && item.status === "needs_confirmation");
+    if (!existing) return false;
+    if (this.#snapshot.mode === "review") {
+      this.#patch({ notice: "Queued prompts cannot be confirmed while review mode is active." });
+      return false;
+    }
+    const confirmed: QueueItem = Object.freeze({
+      ...existing,
+      mode: this.#snapshot.mode,
+      writer: this.#snapshot.writer,
+      writerLeaseId: this.#snapshot.writerLease?.id ?? null,
+      status: "queued",
+    });
+    this.#patch({
+      queue: this.#snapshot.queue.map((item) => item.id === id ? confirmed : item),
+      notice: `Queued request ${id.slice(0, 8)} confirmed for the current safety mode.`,
+    });
+    void this.#scheduleQueue();
+    return true;
   }
 
   setRole(role: RoleId, provider: ProviderId): void {
@@ -354,7 +457,7 @@ export class CompareOrchestrator {
       const generic = `${reviewer}_generic` as ReviewMechanism;
       const advertised = this.adapters[reviewer].reviewMechanisms ?? [generic];
       const availableMechanisms = advertised.filter((mechanism) =>
-        mechanism === generic || (reviewer === "codex" && mechanism === "codex_native")
+        mechanism === generic || (this.#allowPreview && reviewer === "codex" && mechanism === "codex_native")
       );
       const mechanism = availableMechanisms.includes("codex_native") ? "codex_native" : generic;
       const envelope = createReviewEnvelope({
@@ -651,39 +754,87 @@ export class CompareOrchestrator {
       this.#patch({ notice: "Use review actions while review mode is active; ordinary dispatch is paused." });
       return false;
     }
-    const selected: ProviderId[] =
-      this.#snapshot.target === "both" ? ["claude", "codex"] : [this.#snapshot.target];
-    const unavailable = selected.find((provider) => !canAccept(this.#snapshot.lanes[provider]));
+    if (this.#snapshot.queueOffer) {
+      this.#patch({ notice: "Resolve the existing queue choice before sending another prompt." });
+      return false;
+    }
+    const item = this.#freezeQueueItem(cleanPrompt);
+    const unavailable = item.providers.find((provider) => this.#snapshot.lanes[provider].status === "UNAVAILABLE");
     if (unavailable) {
+      this.#patch({ notice: `${unavailable} is unavailable; nothing was sent or queued.` });
+      return false;
+    }
+    const busy = item.providers.some((provider) => !canAccept(this.#snapshot.lanes[provider]) || this.#queueDepth(provider) > 0);
+    if (busy) {
       this.#patch({
-        notice: this.#snapshot.target === "both"
-          ? `${unavailable} cannot accept a turn; nothing was sent. Choose another target explicitly or wait.`
-          : `${unavailable} cannot accept a turn.`,
+        queueOffer: item,
+        notice: `${item.target} cannot start atomically now. Queue the whole request or cancel; nothing was sent.`,
       });
       return false;
     }
-
-    const envelope: PromptEnvelope = Object.freeze({
-      envelopeId: randomUUID(),
-      createdAt: new Date().toISOString(),
-      prompt: cleanPrompt,
-    });
-    if (this.#snapshot.mode === "build" && this.#snapshot.writer && selected.includes(this.#snapshot.writer)) {
-      this.#lastWriterPrompt = cleanPrompt;
-    }
-    for (const provider of selected) {
-      this.#patchLane(provider, { status: "STARTING", error: null, errorKind: null, toolSummary: null });
-    }
-    this.#patch({ notice: null });
-    void Promise.allSettled(selected.map((provider) => this.#runLane(provider, envelope)));
+    this.#startQueueItem(item);
     return true;
   }
 
-  async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism): Promise<void> {
+  #queueContextMatches(item: QueueItem): boolean {
+    return item.mode === this.#snapshot.mode &&
+      item.writer === this.#snapshot.writer &&
+      item.writerLeaseId === (this.#snapshot.writerLease?.id ?? null);
+  }
+
+  #startQueueItem(item: QueueItem): void {
+    if (item.mode === "build" && item.writer && item.providers.includes(item.writer)) this.#lastWriterPrompt = item.envelope.prompt;
+    for (const provider of item.providers) {
+      this.#patchLane(provider, { status: "STARTING", error: null, errorKind: null, toolSummary: null });
+    }
+    this.#patch({ notice: null });
+    void Promise.allSettled(item.providers.map((provider) => this.#runLane(provider, item.envelope, undefined, item.models[provider])));
+  }
+
+  async #scheduleQueue(): Promise<void> {
+    if (this.#queueScheduling) return;
+    this.#queueScheduling = true;
+    try {
+      let changed = true;
+      while (changed) {
+        changed = false;
+        const queue = [...this.#snapshot.queue];
+        for (const item of queue) {
+          if (item.status === "needs_confirmation") continue;
+          const isHeadForEveryLane = item.providers.every((provider) =>
+            this.#snapshot.queue.find((candidate) => candidate.providers.includes(provider))?.id === item.id
+          );
+          if (!isHeadForEveryLane || item.providers.some((provider) => !canAccept(this.#snapshot.lanes[provider]))) continue;
+          if (!this.#queueContextMatches(item)) {
+            this.#patch({
+              queue: this.#snapshot.queue.map((candidate) => candidate.id === item.id
+                ? Object.freeze({ ...candidate, status: "needs_confirmation" as const })
+                : candidate),
+              notice: `Queued request ${item.id.slice(0, 8)} needs confirmation because workspace authority changed.`,
+            });
+            changed = true;
+            break;
+          }
+          this.#patch({ queue: this.#snapshot.queue.filter((candidate) => candidate.id !== item.id) });
+          this.#startQueueItem(item);
+          changed = true;
+          break;
+        }
+      }
+    } finally {
+      this.#queueScheduling = false;
+    }
+  }
+
+  async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism, frozenModel?: string): Promise<void> {
     const adapter = this.adapters[provider];
     try {
       let session = this.#sessions.get(provider);
-      const requestedModel = this.#snapshot.lanes[provider].requestedModel;
+      const requestedModel = frozenModel ?? this.#snapshot.lanes[provider].requestedModel;
+      if (session && session.requestedModel !== requestedModel) {
+        this.#sessions.delete(provider);
+        session = undefined;
+      }
       if (!session) {
         session = await adapter.startSession({ projectRoot: this.projectRoot, requestedModel });
         this.#sessions.set(provider, session);
@@ -735,6 +886,8 @@ export class CompareOrchestrator {
         safetyEffect: null,
       });
       if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+    } finally {
+      void this.#scheduleQueue();
     }
   }
 
@@ -915,6 +1068,7 @@ export class CompareOrchestrator {
     this.#gitRefreshTimer = null;
     this.#resolveApprovalsFor("claude", "cancel_turn");
     this.#resolveApprovalsFor("codex", "cancel_turn");
+    this.#patch({ queue: [], queueOffer: null });
     await Promise.allSettled(Object.values(this.adapters).map((adapter) => adapter.close()));
     if (this.#snapshot.writer) this.#completeRevocation(this.#snapshot.writer);
   }

@@ -214,3 +214,21 @@ or authorize paid live model turns.
   and terminal alternate-screen restoration.
 - Offline validation passed 69 tests plus type checking. No provider model turn
   or credential was used.
+
+### 2026-07-26 — Configuration and atomic queues
+
+- Added strict `config/v1` user and project JSON with exact-key validation,
+  documented platform paths, field-level project precedence, provider-local
+  model sources, role/UI settings, preview preference, and a queue limit from 1
+  through 10.
+- Added an explicit busy-lane Queue/Cancel choice, per-provider FIFO capacity,
+  atomic `both` groups, immutable prompt/model/authority snapshots, removable
+  queue entries, and `NEEDS_CONFIRMATION` after writer authority changes.
+- Added visible queue and configuration overlays. No queued request retargets,
+  dispatches partially, inherits a new writer lease, or survives application
+  shutdown.
+- Credential-free tests cover precedence, invalid paths and keys, model source,
+  queue bounds, paired-lane atomicity, frozen models, authority reconfirmation,
+  removal, rendering, and shutdown cleanup. Type checking, 74 offline tests,
+  macOS/Linux builds, and terminal restoration passed; no provider model turn
+  was started.

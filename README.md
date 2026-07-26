@@ -47,9 +47,34 @@ Pressing Enter with a prompt does start a turn for the selected target.
 The footer lists every keyboard action. Important controls are `Ctrl+R` for the
 target, `Alt+1`/`Alt+2` for lane focus, `Ctrl+B` for two-step writer promotion,
 `Ctrl+W` to revoke the writer, `Ctrl+A` for pending approvals, `Ctrl+X` for
-lane-local cancellation, `Ctrl+V` to prepare a review handoff, `Ctrl+F` for
+lane-local cancellation, `Ctrl+K` for the request queue, `Ctrl+U` for effective
+configuration, `Ctrl+V` to prepare a review handoff, `Ctrl+F` for
 review findings, `Ctrl+I` for the read-only Git inspector, and `Ctrl+Q` to close
 provider transports and exit.
+
+When a selected lane is busy, Splitlane sends nothing and asks whether to queue
+the complete request. `both` remains one atomic queue group and starts only when
+both lanes are idle. Queued prompts freeze their target, models, workspace mode,
+and writer lease; changed write authority requires confirmation. Queues are
+bounded per lane and discarded on exit.
+
+Configuration uses strict versioned JSON. Project settings at
+`.splitlane/config.json` override user settings; per-request model selections
+override both. The user file is `~/Library/Application Support/Splitlane/config.json`
+on macOS and `${XDG_CONFIG_HOME:-~/.config}/splitlane/config.json` on Linux.
+
+```json
+{
+  "version": 1,
+  "providers": { "claude": { "model": "default" }, "codex": { "model": "default" } },
+  "queue": { "limit": 10 },
+  "ui": { "inspector": true, "show_tools": "collapsed", "restore_sessions": "ask" }
+}
+```
+
+Unknown keys and invalid values stop startup with an exact configuration path.
+Configuration cannot contain credentials, session IDs, writer leases, or
+persistent approvals because those keys are not part of the schema.
 
 Each lane has an independent line viewport. `Page Up` and `Page Down` scroll the
 focused lane, `Home` jumps to its oldest retained output, and `End` resumes

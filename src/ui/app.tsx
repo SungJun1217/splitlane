@@ -6,7 +6,7 @@ import { providerErrorAction } from "../core/provider-error.ts";
 import { contentHeight, laneOutputHeight, selectLayout } from "./layout.ts";
 import { lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
-type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | null;
+type Overlay = "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | null;
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -48,7 +48,7 @@ function Lane({ lane, focused, height, scrollOffset }: { lane: LaneSnapshot; foc
         <Text bold>{lane.provider === "claude" ? "CLAUDE CODE" : "CODEX"}</Text>
         <Text color={statusColor(lane.status)}>{lane.status}</Text>
       </Box>
-      <Text dimColor>model: {lane.effectiveModel}  session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}</Text>
+      <Text dimColor>model: {lane.effectiveModel} ({lane.modelSource})  session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}</Text>
       <Text color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
         {latestActivity ? `${latestActivity.kind} · ${latestActivity.status} · ${latestActivity.title}` : "activity · none"}
         {viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : " · FOLLOW TAIL"}
@@ -98,7 +98,7 @@ function Inspector({ snapshot, height }: { snapshot: AppSnapshot; height: number
   );
 }
 
-function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded }: {
+function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
   modelProvider: ProviderId;
@@ -112,11 +112,12 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   staleAcknowledged: boolean;
   activityIndex: number;
   activityExpanded: boolean;
+  queueIndex: number;
 }) {
   if (overlay === "model") {
     return (
       <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
-        <Text bold>MODEL · {modelProvider.toUpperCase()}</Text>
+        <Text bold>MODEL · {modelProvider.toUpperCase()} · source {snapshot.lanes[modelProvider].modelSource}</Text>
         <Text>Exact ID or default: <Text color="cyan">{modelDraft || " "}</Text></Text>
         <Text dimColor>Tab provider · Enter apply to next request · Esc close</Text>
       </Box>
@@ -244,12 +245,56 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text bold>HELP · CURRENT ACTIONS ARE ALWAYS VISIBLE</Text>
         <Text>Prompt: Enter send · Ctrl+R target · Option+1/2 focus</Text>
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
-        <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics</Text>
+        <Text>Evidence: Ctrl+I inspector · Ctrl+T activity · Ctrl+D diagnostics · Ctrl+K queue</Text>
         <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings</Text>
-        <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities</Text>
+        <Text>Controls: Ctrl+A approvals · Ctrl+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+Q closes transports and exits · Esc closes a modal</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
         <Text dimColor>Ctrl+G/Esc close</Text>
+      </Box>
+    );
+  }
+  if (overlay === "queue_offer") {
+    const offer = snapshot.queueOffer;
+    return (
+      <Box borderStyle="double" borderColor="yellow" flexDirection="column" paddingX={1}>
+        <Text bold>REQUEST CANNOT START NOW · NOTHING SENT</Text>
+        {offer ? <>
+          <Text>target: {offer.target.toUpperCase()} · lanes: {offer.providers.join(" + ")}</Text>
+          <Text>mode/writer: {offer.mode} · {offer.writer ?? "none"} · authority frozen</Text>
+          <Text>models: Claude {offer.models.claude} · Codex {offer.models.codex}</Text>
+          <Text>{tailLines(offer.envelope.prompt, 3)}</Text>
+          <Text color="yellow">Q queue whole request · C/Esc cancel</Text>
+        </> : <Text>The pending choice expired. Esc close.</Text>}
+      </Box>
+    );
+  }
+  if (overlay === "queue") {
+    const item = snapshot.queue[queueIndex] ?? snapshot.queue[0];
+    return (
+      <Box borderStyle="double" borderColor="cyan" flexDirection="column" paddingX={1}>
+        <Text bold>REQUEST QUEUE · {snapshot.queue.length} GROUP(S) · LIMIT {snapshot.queueLimit}/LANE</Text>
+        {snapshot.queue.length ? snapshot.queue.slice(0, 8).map((candidate, index) => <Text key={candidate.id} color={index === queueIndex ? "cyan" : candidate.status === "needs_confirmation" ? "yellow" : "white"}>
+          {index === queueIndex ? ">" : " "} {candidate.id.slice(0, 8)} · {candidate.target} · {candidate.status} · {candidate.envelope.prompt.slice(0, 48)}
+        </Text>) : <Text>Queue is empty.</Text>}
+        {item ? <Text dimColor>frozen: {item.mode}/{item.writer ?? "none"} · C {item.models.claude} · X {item.models.codex}</Text> : null}
+        <Text dimColor>↑/↓ select · D remove · C confirm changed authority · Ctrl+K/Esc close</Text>
+      </Box>
+    );
+  }
+  if (overlay === "configuration") {
+    const config = snapshot.configuration;
+    return (
+      <Box borderStyle="double" borderColor="green" flexDirection="column" paddingX={1}>
+        <Text bold>CONFIGURATION · STRICT JSON · PROJECT OVERRIDES USER</Text>
+        <Text>{config.loadedProject ? "LOADED" : "missing"} project: {config.projectPath}</Text>
+        <Text>{config.loadedUser ? "LOADED" : "missing"} user: {config.userPath}</Text>
+        <Text>queue limit: {snapshot.queueLimit} · tools: {config.showTools} · restore: {config.restoreSessions}</Text>
+        <Text>preview capabilities: {config.allowPreview ? "enabled" : "disabled"}</Text>
+        <Text>Claude model: {snapshot.lanes.claude.requestedModel} ({snapshot.lanes.claude.modelSource})</Text>
+        <Text>Codex model: {snapshot.lanes.codex.requestedModel} ({snapshot.lanes.codex.modelSource})</Text>
+        <Text color="yellow">Config is read-only in the TUI; Ctrl+M creates a per-request model override.</Text>
+        <Text dimColor>Ctrl+U/Esc close</Text>
       </Box>
     );
   }
@@ -264,7 +309,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0 }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
@@ -282,6 +327,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   scrollOffsets?: Record<ProviderId, number>;
   activityIndex?: number;
   activityExpanded?: boolean;
+  queueIndex?: number;
 }) {
   const layout = selectLayout(columns);
   const height = contentHeight(rows);
@@ -292,16 +338,16 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   const focusedLaneHeight = snapshot.inspectorVisible ? Math.max(6, Math.floor(height * 0.65)) : height;
   const roleSummary = ROLE_IDS.map((role) => `${role.replace("_reviewer", "-rev")}:${snapshot.roles[role] === "claude" ? "C" : "X"}`).join(" · ");
   const footer = layout === "focused"
-    ? "PgUp/PgDn scroll · End tail · ^G help · ^T activity · ⌥1/2 focus · ^Q quit"
-    : "Enter send · PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^R target · ^B build · ^V review · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^Q quit";
+    ? "PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ⌥1/2 focus · ^Q quit"
+    : "Enter send · PgUp/PgDn scroll · End tail · ^G help · ^T activity · ^K queue · ^R target · ^B build · ^V review · ^A approvals · ⌥1/2 focus · ^X cancel · ^I inspector · ^Q quit";
   return (
     <Box flexDirection="column">
-      <Box justifyContent="space-between">
+      <Box justifyContent={layout === "focused" ? "flex-start" : "space-between"} flexDirection={layout === "focused" ? "column" : "row"}>
         <Text bold color="cyan">SPLITLANE · {layout.toUpperCase()}</Text>
-        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
+        <Text>mode <Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{snapshot.writer?.toUpperCase() ?? "NONE"}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text> · target <Text color="yellow">{snapshot.target.toUpperCase()}</Text></Text>
       </Box>
       <Text dimColor>role preview (C=Claude X=Codex) · {roleSummary} · never auto-routes</Text>
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} /> : (
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} /> : (
         <Box flexDirection={outerDirection} gap={1}>
           <Box flexDirection={laneDirection} flexGrow={snapshot.inspectorVisible ? 2 : 1} gap={1}>
             {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} focused={snapshot.focusedProvider === provider} height={layout === "focused" ? focusedLaneHeight : laneHeight} scrollOffset={scrollOffsets[provider]} />)}
@@ -337,7 +383,8 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   const [scrollOffsets, setScrollOffsets] = useState<Record<ProviderId, number>>({ claude: 0, codex: 0 });
   const previousLineCounts = useRef<Record<ProviderId, number>>({ claude: 0, codex: 0 });
   const [activityIndex, setActivityIndex] = useState(0);
-  const [activityExpanded, setActivityExpanded] = useState(false);
+  const [activityExpanded, setActivityExpanded] = useState(snapshot.configuration.showTools === "expanded");
+  const [queueIndex, setQueueIndex] = useState(0);
 
   useEffect(() => {
     const counts: Record<ProviderId, number> = {
@@ -367,6 +414,11 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
   }, [snapshot.approvals.length]);
 
   useEffect(() => {
+    if (snapshot.queueOffer) setOverlay("queue_offer");
+    else if (overlay === "queue_offer") setOverlay(null);
+  }, [snapshot.queueOffer]);
+
+  useEffect(() => {
     if (snapshot.mode === "review" && snapshot.review && snapshot.review.status !== "running") {
       setFindingIndex(0);
       setStaleAcknowledged(false);
@@ -382,6 +434,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       return;
     }
     if (key.escape) {
+      if (overlay === "queue_offer") orchestrator.cancelQueueOffer();
       setOverlay(null);
       setWriterConfirm(false);
       return;
@@ -396,6 +449,31 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
       else if (key.downArrow) setActivityIndex((index) => Math.min(Math.max(0, activities.length - 1), index + 1));
       else if (input === " ") setActivityExpanded((value) => !value);
       else if (key.ctrl && input === "t") setOverlay(null);
+      return;
+    }
+    if (overlay === "queue_offer") {
+      if (input.toLowerCase() === "q" && orchestrator.confirmQueueOffer()) {
+        setPrompt("");
+        setOverlay(null);
+      } else if (input.toLowerCase() === "c") {
+        orchestrator.cancelQueueOffer();
+        setOverlay(null);
+      }
+      return;
+    }
+    if (overlay === "queue") {
+      const count = Math.max(1, snapshot.queue.length);
+      if (key.upArrow) setQueueIndex((index) => (index - 1 + count) % count);
+      else if (key.downArrow) setQueueIndex((index) => (index + 1) % count);
+      else {
+        const item = snapshot.queue[queueIndex] ?? snapshot.queue[0];
+        if (item && input.toLowerCase() === "d") orchestrator.removeQueued(item.id);
+        else if (item && input.toLowerCase() === "c") orchestrator.confirmQueued(item.id);
+      }
+      return;
+    }
+    if (overlay === "configuration") {
+      if (key.ctrl && input === "u") setOverlay(null);
       return;
     }
     if (overlay === "model") {
@@ -554,9 +632,14 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (key.ctrl && input === "t") {
       const activities = snapshot.lanes[snapshot.focusedProvider].activities;
       setActivityIndex(Math.max(0, activities.length - 1));
-      setActivityExpanded(false);
+      setActivityExpanded(snapshot.configuration.showTools === "expanded");
       setOverlay("activity");
     }
+    else if (key.ctrl && input === "k") {
+      setQueueIndex(0);
+      setOverlay("queue");
+    }
+    else if (key.ctrl && input === "u") setOverlay("configuration");
     else if (key.ctrl && input === "d") setOverlay("diagnostics");
     else if (key.ctrl && input === "o") {
       setRoleProvider(snapshot.roles[ROLE_IDS[roleIndex] ?? "scout"]);
@@ -567,5 +650,5 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
     else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} />;
 }
