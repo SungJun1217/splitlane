@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">Splitlane mark</title>
+  <desc id="desc">Two luminous agent lanes controlled from one point above.</desc>
+  <defs>
+    <linearGradient id="panel" x1="18" y1="12" x2="142" y2="148" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#151B2B"/>
+      <stop offset="1" stop-color="#080B12"/>
+    </linearGradient>
+    <linearGradient id="leftLane" x1="35" y1="39" x2="63" y2="127" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#06B6D4"/>
+    </linearGradient>
+    <linearGradient id="rightLane" x1="125" y1="39" x2="97" y2="127" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C4B5FD"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="4" y="4" width="152" height="152" rx="36" fill="url(#panel)" stroke="#27324A" stroke-width="2"/>
+  <path d="M28 49H132" stroke="#33415F" stroke-width="4" stroke-linecap="round"/>
+  <path d="M80 31V49" stroke="#FBBF24" stroke-width="5" stroke-linecap="round" filter="url(#glow)"/>
+  <rect x="72" y="19" width="16" height="16" rx="5" transform="rotate(45 80 27)" fill="#FBBF24"/>
+  <circle cx="80" cy="49" r="7" fill="#F8FAFC" stroke="#FBBF24" stroke-width="3"/>
+  <path d="M75 53C60 60 48 68 48 85V125" fill="none" stroke="url(#leftLane)" stroke-width="9" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M85 53C100 60 112 68 112 85V125" fill="none" stroke="url(#rightLane)" stroke-width="9" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M36 115L48 128L60 115" fill="none" stroke="#A5F3FC" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M100 115L112 128L124 115" fill="none" stroke="#DDD6FE" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="48" cy="91" r="3" fill="#ECFEFF"/>
+  <circle cx="112" cy="91" r="3" fill="#F5F3FF"/>
+</svg>

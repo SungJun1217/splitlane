@@ -1,194 +1,288 @@
+<div align="center">
+
+<img src="docs/assets/splitlane-mark.svg" alt="Splitlane — two agent lanes controlled from above" width="118">
+
 # Splitlane
 
-Splitlane is a local terminal UI that keeps Claude Code and Codex in separate
-lanes. It starts in read-only `compare` mode. The current v0.1 preview includes
-an explicit single-writer `build` mode, read-only single/two-lens review,
-one shared meta conversation over independent native child sessions,
-metadata-only restore, atomic queues, role handoff packets, and opt-in isolated
-worktrees. There is no automatic routing, grading, merging, or review/fix loop.
+**One terminal. Two independent coding-agent lanes. One human-controlled workflow.**
 
-## Install the v0.1 preview
+Route the same prompt to Claude Code and Codex, compare their live output, and
+control exactly which provider may write.
 
-The first GitHub distribution targets are macOS on Apple Silicon and glibc-based
-Linux on x86_64. After a public release is published, install the matching
-standalone executable without cloning the repository or installing Bun:
+[![Latest release](https://img.shields.io/github/v/release/SungJun1217/splitlane?style=flat-square)](https://github.com/SungJun1217/splitlane/releases/latest)
+[![Release binaries](https://img.shields.io/github/actions/workflow/status/SungJun1217/splitlane/release.yml?style=flat-square&label=release)](https://github.com/SungJun1217/splitlane/actions/workflows/release.yml)
+![Preview](https://img.shields.io/badge/status-v0.1_preview-f59e0b?style=flat-square)
+![macOS ARM64](https://img.shields.io/badge/macOS-ARM64-111827?style=flat-square&logo=apple)
+![Linux x64](https://img.shields.io/badge/Linux-x64-111827?style=flat-square&logo=linux)
+
+</div>
+
+<p align="center">
+  <img src="docs/assets/splitlane-hero.svg" alt="Splitlane terminal with independent Claude Code and Codex lanes, a shared prompt, and a read-only evidence inspector" width="100%">
+</p>
+
+> [!IMPORTANT]
+> Splitlane is a local meta-harness for the separately installed official
+> `claude` and `codex` CLIs. It does not install providers, store their
+> credentials, or call model APIs directly.
+
+```text
+                          shared prompt
+                               │
+                 ┌─────────────┴─────────────┐
+                 ▼                           ▼
+        ┌─────────────────┐         ┌─────────────────┐
+        │   Claude Code   │         │      Codex      │
+        │ session · model │         │ thread · model  │
+        │ output · tools  │         │ output · tools  │
+        └────────┬────────┘         └────────┬────────┘
+                 └─────────────┬─────────────┘
+                               ▼
+                   read-only evidence inspector
+                    diff · files · findings
+```
+
+## Why Splitlane?
+
+| Capability | Behavior |
+|---|---|
+| Parallel prompting | `BOTH` sends one immutable request to Claude Code and Codex at nearly the same time. |
+| Shared meta conversation | Independent native sessions are grouped into one visible conversation with bounded peer-context relay. |
+| Independent lanes | Models, streaming output, tools, status, cancellation, and failures remain provider-local. |
+| Explicit write control | The safe default is read-only comparison; build mode grants one visible writer lease. |
+| Evidence-first review | Inspect changed files, Git diff, previews, and provider-attributed findings without editing inside the TUI. |
+| Recovery | Restore provider session metadata, recover isolated worktrees, and keep queues and authority fail-closed. |
+
+There is no automatic routing, answer grading, winner selection, merge, or
+review/fix loop. Recommendations remain visible and overridable; the human stays
+in control.
+
+## Quick start
+
+### 1. Install
+
+The standalone preview currently supports macOS on Apple Silicon and
+glibc-based Linux on x86_64:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/splitlane/main/scripts/install.sh | sh
 ```
 
-The installer verifies the release SHA-256 checksum and writes to
-`~/.local/bin/splitlane`. Override the location with
-`SPLITLANE_INSTALL_DIR=/your/bin`. Splitlane does not install or configure the
-provider CLIs.
+The installer verifies the release SHA-256 checksum and writes
+`~/.local/bin/splitlane`. Use `SPLITLANE_INSTALL_DIR=/your/bin` to choose another
+directory.
 
-Standalone installs created by this script check the public GitHub latest
-release in the background at most once per 24 hours. A newer stable release is
-size-bounded, SHA-256 verified, checked with `--version`, and atomically replaces
-only the managed Splitlane executable. The active process keeps running and the
-new version is used on the next launch. Run an immediate check with:
+### 2. Check your local harnesses
 
 ```sh
-splitlane update
+splitlane doctor /path/to/project
 ```
 
-Set user configuration `updates.mode` to `notify` to report updates without
-installing them, or `off` to disable background checks. The environment variable
-`SPLITLANE_DISABLE_AUTOUPDATE=1` is an immediate background-check kill switch.
-Project configuration cannot control executable updates. Source runs, symlinks,
-unsupported platforms, and installations without the installer's managed marker
-are never modified automatically.
+Doctor checks CLI discovery, versions, coarse authentication status, local
+schemas, sandbox contracts, and transport initialization. It starts zero model
+turns, prints no raw authentication output, and modifies no provider settings.
 
-Then start it for a project:
+For machine-readable diagnostics:
+
+```sh
+splitlane doctor /path/to/project --json
+```
+
+### 3. Start Splitlane
 
 ```sh
 splitlane /path/to/project
 ```
 
-The separately installed and authenticated official `claude` and `codex` CLIs
-remain prerequisites. Linux ARM64/musl, Intel macOS, and Windows binaries are
-not yet validated or published.
+The initial mode is `COMPARE`, the writer is `NONE`, and the prompt target is
+`BOTH`. Type in the shared editor and press `Enter` to start both provider turns.
 
-## Run from source
+> [!NOTE]
+> Starting the TUI probes locally installed CLIs but does not start a model
+> turn. Sending a prompt does.
 
-Prerequisites are Bun, Node 22 or newer, and the user's separately installed and
-authenticated official `claude` and `codex` CLIs.
+## One meta conversation, two real sessions
+
+Claude's native session ID and Codex's native thread ID cannot literally be the
+same identifier. Splitlane keeps both provider sessions intact and groups them
+under one visible `meta-session/v1` identity.
+
+- A `BOTH` request reaches both lanes concurrently.
+- A Claude-only or Codex-only turn reaches the inactive provider lazily on that
+  provider's next real request—never through a hidden paid synchronization turn.
+- Parallel answers cannot see one another while they are being generated. Each
+  becomes peer context for the following ordinary turn.
+- Relayed provider text is bounded, credential-redacted, and clearly delimited
+  as untrusted quoted evidence rather than system or permission authority.
+- Shared transcript text stays in memory. Only opaque session metadata and a
+  synchronization epoch may be restored; Splitlane never fabricates continuity
+  by replaying missing prompts.
+
+The header shows the meta ID, epoch, pending entries, retained bytes, and
+redaction count. Each lane shows how much shared context it received.
+
+## Workflow modes
+
+| Mode | Claude Code | Codex | Intended use |
+|---|---|---|---|
+| `compare` | Read-only | Read-only | Compare answers, plans, and reviews safely. |
+| `build` | One writer or inactive | One writer or inactive | Normal implementation with a single visible writer lease. |
+| `review` | Writer paused | Reviewer read-only | Review a frozen diff without granting reviewer writes. |
+| `isolated` | Own worktree | Own worktree | Parallel implementation in separate worktrees and branches. |
+
+Build mode does not retarget prompts. With target `BOTH`, the selected writer
+gets workspace-write access and the peer receives the same request read-only.
+Network access and persistent permission rules remain disabled; supported
+approvals are allow once, deny, or cancel turn.
+
+## Keyboard map
+
+Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
+
+| Area | Keys |
+|---|---|
+| Prompt routing | `Enter` send · `Ctrl+R` cycle `BOTH/CLAUDE/CODEX` |
+| Lane focus | `Alt+1` Claude · `Alt+2` Codex |
+| Output | `PgUp/PgDn` scroll · `Home` oldest · `End` follow tail |
+| Workflow | `Ctrl+B` promote writer · `Ctrl+W` revoke · `Ctrl+V` review |
+| Evidence | `Ctrl+I` inspector · `Ctrl+T` activity · `Ctrl+F` findings |
+| Control | `Ctrl+A` approvals · `Ctrl+X` cancel focused lane · `Ctrl+K` queue |
+| Advanced | `Ctrl+H` role handoff · `Ctrl+L` isolated worktrees |
+| Settings | `Ctrl+M` models · `Ctrl+O` roles · `Ctrl+P` capabilities · `Ctrl+U` config |
+| Lifecycle | `Ctrl+N` reset focused session · `Ctrl+Q` close and exit |
+
+When a selected lane is busy, Splitlane sends nothing until you explicitly
+queue or cancel the whole request. A `BOTH` request remains one atomic queue
+group; it never silently reaches only one provider.
+
+## Automatic updates
+
+Standalone installations created by `install.sh` default to Claude Code-style
+background updates:
+
+1. On TUI startup, check the public GitHub latest release at most once every 24
+   hours.
+2. Accept only a stable SemVer release and the exact supported platform asset.
+3. Bound the download and verify its published SHA-256 and reported
+   `--version`.
+4. Atomically replace only the managed Splitlane executable.
+5. Keep the active TUI running and use the new version on the next launch.
+
+Run an immediate update check with:
 
 ```sh
-bun install
-bun run dev /path/to/project
+splitlane update
 ```
 
-Starting Splitlane probes local CLI versions but does not start a model turn.
-Pressing Enter with a prompt does start a turn for the selected target.
+Source runs, unmanaged files, symlinks, unsupported platforms, and package
+manager paths are never auto-modified. Failures preserve the current executable
+and surface an actionable message.
 
-Check the local installation without starting a provider thread or model turn:
+| User setting | Effect |
+|---|---|
+| `"auto"` | Check and install in the background. This is the default. |
+| `"notify"` | Check in the background and report an available update. |
+| `"off"` | Disable background update checks. |
 
-```sh
-splitlane doctor /path/to/project
-splitlane doctor /path/to/project --json
-```
+Set `SPLITLANE_DISABLE_AUTOUPDATE=1` for an immediate background-check kill
+switch. The explicit `splitlane update` command remains available. Project
+configuration cannot enable or control executable updates.
 
-Doctor reports binary/version/help compatibility, coarse authentication state,
-locally generated Codex schema support, sandbox contracts, and a Codex
-app-server `initialize` handshake. It never prints raw auth output, starts a
-provider thread, modifies provider configuration, or persists credentials.
+## Configuration
 
-The footer lists every keyboard action. Important controls are `Ctrl+R` for the
-target, `Alt+1`/`Alt+2` for lane focus, `Ctrl+B` for two-step writer promotion,
-`Ctrl+W` to revoke the writer, `Ctrl+A` for pending approvals, `Ctrl+X` for
-lane-local cancellation, `Ctrl+K` for the request queue, `Ctrl+U` for effective
-configuration, `Ctrl+V` to prepare a review handoff, `Ctrl+F` for
-review findings, `Ctrl+L` for isolated worktree preview/recovery, `Ctrl+I` for
-the read-only evidence inspector, and `Ctrl+Q` to close provider transports and
-exit.
+Splitlane uses strict, versioned JSON. Project settings override user settings;
+per-request model selections override both.
 
-When a selected lane is busy, Splitlane sends nothing and asks whether to queue
-the complete request. `both` remains one atomic queue group and starts only when
-both lanes are idle. Queued prompts freeze their target, models, workspace mode,
-and writer lease; changed write authority requires confirmation. Queues are
-bounded per lane and discarded on exit.
+| Scope | Path |
+|---|---|
+| Project | `.splitlane/config.json` |
+| User on macOS | `~/Library/Application Support/Splitlane/config.json` |
+| User on Linux | `${XDG_CONFIG_HOME:-~/.config}/splitlane/config.json` |
 
-Configuration uses strict versioned JSON. Project settings at
-`.splitlane/config.json` override user settings; per-request model selections
-override both. The user file is `~/Library/Application Support/Splitlane/config.json`
-on macOS and `${XDG_CONFIG_HOME:-~/.config}/splitlane/config.json` on Linux.
-
-Example user configuration (project configuration uses the same schema except
-that it must omit `updates`):
+Example user configuration:
 
 ```json
 {
   "version": 1,
-  "providers": { "claude": { "model": "default" }, "codex": { "model": "default" } },
+  "providers": {
+    "claude": { "model": "default" },
+    "codex": { "model": "default" }
+  },
   "queue": { "limit": 10 },
-  "ui": { "inspector": true, "show_tools": "collapsed", "restore_sessions": "ask" },
+  "ui": {
+    "inspector": true,
+    "show_tools": "collapsed",
+    "restore_sessions": "ask"
+  },
   "updates": { "mode": "auto" }
 }
 ```
 
-`updates` is accepted only in the user file. Valid modes are `auto` (default),
-`notify`, and `off`.
+Project configuration uses the same schema but must omit `updates`. Unknown
+keys and invalid values stop startup with an exact configuration path.
+Credentials, session IDs, writer leases, and persistent approvals are not valid
+configuration keys.
 
-Unknown keys and invalid values stop startup with an exact configuration path.
-Configuration cannot contain credentials, session IDs, writer leases, or
-persistent approvals because those keys are not part of the schema.
+`default` model selection inherits the provider CLI configuration and passes no
+model override. Exact provider-specific model IDs are also accepted.
 
-Session continuity stores metadata only under the platform user-state directory
-(`~/Library/Application Support/Splitlane/state` on macOS or
-`${XDG_STATE_HOME:-~/.local/state}/splitlane` on Linux). On startup, the default
-`ask` policy offers Restore, Start new, and metadata inspection. Restore uses the
-provider's opaque session/thread ID and never replays prompts; it restores no
-writer lease, approval, queue, or workflow mode. `Ctrl+N` resets only the focused
-lane's Splitlane metadata after confirmation and leaves provider-owned history
-untouched.
+## Sessions, review, and worktrees
 
-Claude's native session and Codex's native thread cannot be the same provider
-identifier, so Splitlane groups them under one visible `meta-session/v1` ID.
-Ordinary user messages and bounded text results form one shared in-memory
-ledger. Before a provider's next requested turn, Splitlane injects every user or
-peer entry that provider has not seen. A Claude-only turn therefore reaches
-Codex when Codex is next invoked, without a hidden synchronization model turn.
+<details>
+<summary><strong>Metadata-only session restoration</strong></summary>
 
-Parallel answers cannot see one another while they are being generated; each is
-pending shared context for the next ordinary turn. The header and lane show the
-meta ID, synchronization epoch, pending entry counts, and injected byte count.
-Peer output is delimited as untrusted context and common credential patterns are
-redacted before relay. Shared text is memory-only and is never written to
-session metadata or logs. After restart, matching child IDs are regrouped under
-the same meta ID in a new visible epoch, with no fabricated transcript replay.
+Session records live under the platform user-state directory, never in the
+tracked repository. Startup can ask to restore, start new, or inspect metadata.
+Restore uses provider-native IDs and restores no prompt replay, writer lease,
+approval, queue, or workflow mode. `Ctrl+N` resets only the focused lane's
+Splitlane metadata.
 
-Each lane has an independent line viewport. `Page Up` and `Page Down` scroll the
-focused lane, `Home` jumps to its oldest retained output, and `End` resumes
-follow-tail mode. New output preserves a manually scrolled position. `Ctrl+T`
-opens the focused lane's bounded activity log, where tool, file, approval,
-warning, and failure entries can be selected and expanded with `Space`.
-`Ctrl+G` opens the in-product keyboard help.
+</details>
 
-Build mode never changes the prompt target automatically. When the target is
-`both`, the selected writer receives workspace-write access while the peer gets
-the same prompt read-only. Approval choices are limited to allow once, deny, and
-cancel turn; network access and persistent permission rules remain disabled.
+<details>
+<summary><strong>Single-lens and two-lens review</strong></summary>
 
-Review starts only from an idle build writer after an implementation turn. The
-confirmation requires acceptance criteria, freezes an exact patch up to 200
-KiB, and revokes the writer lease before dispatching to the other provider in
-read-only mode. Findings retain provider attribution and file/line locations.
-Returning selected findings prepares the shared prompt and reopens normal writer
-promotion; it never sends a fix prompt automatically. When the installed Codex
-app-server schema exposes the required `review/start` contract, Splitlane offers
-that mechanism as a visible `preview` and keeps the generic read-only turn as an
-explicit alternative. Press `Tab` in the confirmation modal to switch. If the
-runtime probe fails, only the generic mechanism is shown; Splitlane never starts
-a model turn while probing and never silently substitutes one mechanism after
-confirmation.
+Review freezes an exact objective, criteria, Git base, diff, and diff hash, then
+revokes the writer lease before starting read-only review. Two-lens review runs
+Claude and Codex independently over the same evidence. Findings, failures, and
+cancellation remain provider-attributed; they are never merged, graded, or
+declared an agreement.
 
-The review confirmation also offers `T` for two-lens review. This revokes the
-writer lease once, freezes the same objective, criteria, Git base, diff, and
-diff hash, then starts Claude and Codex independently in read-only mode. `Tab`
-switches the visible lens. Findings, failures, and cancellation remain attributed
-to their provider and are never merged, deduplicated, scored, or declared an
-agreement.
+</details>
 
-`Ctrl+H` prepares an explicit scout → architect → builder handoff from completed
-focused-lane output and the shared editor objective. The preview shows its
-constraints, relevant files, questions, acceptance criteria, source session,
-and Git fingerprint. Confirming only places the bounded packet into the shared
-prompt editor; it does not change the target or send a provider turn.
+<details>
+<summary><strong>Role handoff packets</strong></summary>
 
-`Ctrl+L` prepares isolated mode only from an idle `compare` state with empty
-queues, no approvals, a clean Git root, and an existing base commit. The first
-screen is a no-write preview. Confirming creates one user-state worktree and
-`splitlane/<run-id>/<provider>` branch per provider; each lane receives write
-access only to its own root while the primary tree remains observational.
-Provider sessions remain independent and restart in their worktree roots.
+`Ctrl+H` prepares a bounded scout → architect → builder packet with constraints,
+files, questions, acceptance criteria, source session, and Git fingerprint.
+Confirmation places it in the shared editor but never changes routing or starts
+a provider turn.
 
-The isolated overlay uses `R` to inspect, `K` to retain, and `C` for safe
-cleanup. Splitlane never runs setup scripts, stashes/resets files, force-removes
-a worktree, integrates commits, or deletes branches. Dirty, unreadable, or
-not-yet-integrated worktrees are retained, and startup surfaces their manifest
-for recovery. Clean worktree directories can be removed only after their head
-is reachable from the primary branch; provider branches still remain.
+</details>
+
+<details>
+<summary><strong>Isolated worktree lifecycle</strong></summary>
+
+`Ctrl+L` starts with a no-write preview and requires an idle compare state,
+empty queues, no approvals, a clean Git root, and an existing base commit.
+Confirmation creates one user-state worktree and branch per provider. Splitlane
+never runs setup scripts, stashes or resets files, force-removes worktrees,
+integrates commits, or deletes branches. Dirty or unintegrated worktrees are
+retained for explicit recovery.
+
+</details>
+
+## Run from source
+
+Prerequisites are Bun, Node.js 22 or newer, and authenticated official Claude
+Code and Codex CLIs.
+
+```sh
+git clone git@github.com:SungJun1217/splitlane.git
+cd splitlane
+bun install
+bun run dev /path/to/project
+```
 
 ## Verify without credentials or model cost
 
@@ -199,6 +293,19 @@ bun run build
 bun run build:compile
 ```
 
-See [the M1 architecture](docs/M1_ARCHITECTURE.md), [the approved M2
-decisions](docs/M2_SINGLE_WRITER_DECISIONS.md), and [the approved M3 handoff
-decisions](docs/M3_REVIEW_HANDOFF_DECISIONS.md) for the safety behavior.
+The offline suite uses captured redacted fixtures and fake provider executables;
+it requires no provider credentials, internet access, or paid model turns.
+
+## Design documents
+
+- [Product plan](docs/PRODUCT_PLAN.md)
+- [M1 architecture](docs/M1_ARCHITECTURE.md)
+- [M1 distribution](docs/M1_DISTRIBUTION.md)
+- [M2 single-writer decisions](docs/M2_SINGLE_WRITER_DECISIONS.md)
+- [M3 review handoff decisions](docs/M3_REVIEW_HANDOFF_DECISIONS.md)
+- [v0.1 completion decisions](docs/V01_COMPLETION_DECISIONS.md)
+
+## Current platform scope
+
+Published binaries are validated for macOS ARM64 and glibc-based Linux x86_64.
+Linux ARM64/musl, Intel macOS, and Windows are not yet published.

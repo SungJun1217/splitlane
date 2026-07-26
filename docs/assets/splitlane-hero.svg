@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 480" role="img" aria-labelledby="title desc">
+  <title id="title">Splitlane terminal meta-harness</title>
+  <desc id="desc">A stylized Splitlane terminal with separate Claude and Codex lanes, a shared prompt, and a read-only evidence panel.</desc>
+  <defs>
+    <linearGradient id="background" x1="40" y1="20" x2="1160" y2="460" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="0.52" stop-color="#090D16"/>
+      <stop offset="1" stop-color="#070911"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="170" y1="72" x2="480" y2="132" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="0.48" stop-color="#E2E8F0"/>
+      <stop offset="1" stop-color="#C4B5FD"/>
+    </linearGradient>
+    <linearGradient id="prompt" x1="88" y1="376" x2="1112" y2="376" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0E7490" stop-opacity=".35"/>
+      <stop offset=".5" stop-color="#172033"/>
+      <stop offset="1" stop-color="#6D28D9" stop-opacity=".32"/>
+    </linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#94A3B8" stroke-opacity=".055"/>
+    </pattern>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <filter id="laneGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="frameClip"><rect x="2" y="2" width="1196" height="476" rx="28"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frameClip)">
+    <rect width="1200" height="480" fill="url(#background)"/>
+    <rect width="1200" height="480" fill="url(#grid)"/>
+    <circle cx="170" cy="100" r="150" fill="#06B6D4" opacity=".08" filter="url(#softGlow)"/>
+    <circle cx="1040" cy="130" r="175" fill="#8B5CF6" opacity=".09" filter="url(#softGlow)"/>
+  </g>
+  <rect x="2" y="2" width="1196" height="476" rx="28" fill="none" stroke="#27324A" stroke-width="2"/>
+
+  <!-- Splitlane mark -->
+  <g transform="translate(62 52) scale(.72)">
+    <rect x="4" y="4" width="152" height="152" rx="36" fill="#0C1220" stroke="#33415F" stroke-width="2"/>
+    <path d="M28 49H132" stroke="#33415F" stroke-width="4" stroke-linecap="round"/>
+    <path d="M80 31V49" stroke="#FBBF24" stroke-width="5" stroke-linecap="round"/>
+    <rect x="72" y="19" width="16" height="16" rx="5" transform="rotate(45 80 27)" fill="#FBBF24"/>
+    <circle cx="80" cy="49" r="7" fill="#F8FAFC" stroke="#FBBF24" stroke-width="3"/>
+    <path d="M75 53C60 60 48 68 48 85V125" fill="none" stroke="#22D3EE" stroke-width="9" stroke-linecap="round"/>
+    <path d="M85 53C100 60 112 68 112 85V125" fill="none" stroke="#A78BFA" stroke-width="9" stroke-linecap="round"/>
+    <path d="M36 115L48 128L60 115M100 115L112 128L124 115" fill="none" stroke="#F8FAFC" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <text x="196" y="94" fill="url(#brand)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="44" font-weight="800" letter-spacing="7">SPLITLANE</text>
+  <text x="198" y="126" fill="#94A3B8" font-family="system-ui, -apple-system, sans-serif" font-size="16" letter-spacing=".8">two agent lanes · one shared meta conversation · human-controlled writes</text>
+
+  <g transform="translate(853 66)">
+    <rect width="270" height="38" rx="19" fill="#111827" stroke="#334155"/>
+    <circle cx="22" cy="19" r="5" fill="#34D399" filter="url(#laneGlow)"/>
+    <text x="38" y="24" fill="#CBD5E1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">COMPARE · BOTH · NO WRITER</text>
+  </g>
+
+  <!-- Terminal frame -->
+  <rect x="60" y="164" width="1080" height="256" rx="16" fill="#080B12" stroke="#334155" stroke-width="2"/>
+  <path d="M60 201H1140" stroke="#263247"/>
+  <circle cx="84" cy="183" r="5" fill="#FB7185"/>
+  <circle cx="103" cy="183" r="5" fill="#FBBF24"/>
+  <circle cx="122" cy="183" r="5" fill="#34D399"/>
+  <text x="146" y="188" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">splitlane · meta 7f3a9c1e · epoch 1 · peer relay memory-only</text>
+
+  <!-- Claude lane -->
+  <rect x="82" y="218" width="305" height="116" rx="10" fill="#0B1420" stroke="#155E75"/>
+  <rect x="82" y="218" width="5" height="116" rx="2.5" fill="#22D3EE"/>
+  <text x="102" y="242" fill="#67E8F9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" letter-spacing="1.2">CLAUDE LANE</text>
+  <rect x="303" y="228" width="61" height="20" rx="10" fill="#064E3B"/>
+  <text x="316" y="242" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="700">RUNNING</text>
+  <text x="102" y="267" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">model default · session 2c91…</text>
+  <rect x="102" y="281" width="218" height="5" rx="2.5" fill="#164E63"/>
+  <rect x="102" y="294" width="252" height="5" rx="2.5" fill="#164E63" opacity=".75"/>
+  <rect x="102" y="307" width="174" height="5" rx="2.5" fill="#164E63" opacity=".5"/>
+  <circle cx="355" cy="309" r="3" fill="#22D3EE" filter="url(#laneGlow)"/>
+
+  <!-- Codex lane -->
+  <rect x="403" y="218" width="305" height="116" rx="10" fill="#12101F" stroke="#6D28D9"/>
+  <rect x="403" y="218" width="5" height="116" rx="2.5" fill="#A78BFA"/>
+  <text x="423" y="242" fill="#C4B5FD" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" letter-spacing="1.2">CODEX LANE</text>
+  <rect x="624" y="228" width="61" height="20" rx="10" fill="#064E3B"/>
+  <text x="637" y="242" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9" font-weight="700">RUNNING</text>
+  <text x="423" y="267" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">model default · thread b840…</text>
+  <rect x="423" y="281" width="245" height="5" rx="2.5" fill="#5B21B6"/>
+  <rect x="423" y="294" width="194" height="5" rx="2.5" fill="#5B21B6" opacity=".75"/>
+  <rect x="423" y="307" width="227" height="5" rx="2.5" fill="#5B21B6" opacity=".5"/>
+  <circle cx="676" cy="309" r="3" fill="#A78BFA" filter="url(#laneGlow)"/>
+
+  <!-- Evidence panel -->
+  <rect x="724" y="218" width="394" height="116" rx="10" fill="#0B1514" stroke="#166534"/>
+  <text x="744" y="242" fill="#6EE7B7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" letter-spacing="1.2">EVIDENCE · READ ONLY</text>
+  <text x="744" y="267" fill="#94A3B8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">M  src/core/orchestrator.ts</text>
+  <text x="744" y="285" fill="#94A3B8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">A  src/meta/session.ts</text>
+  <text x="744" y="303" fill="#34D399" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">+ 42</text>
+  <text x="786" y="303" fill="#FB7185" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">− 8</text>
+  <rect x="744" y="314" width="344" height="3" rx="1.5" fill="#14532D"/>
+
+  <!-- Shared prompt -->
+  <rect x="82" y="351" width="1036" height="47" rx="10" fill="url(#prompt)" stroke="#475569"/>
+  <text x="102" y="380" fill="#67E8F9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700">›</text>
+  <text x="126" y="379" fill="#E2E8F0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">Review this change and explain the safest implementation…</text>
+  <rect x="1017" y="362" width="81" height="24" rx="12" fill="#78350F" stroke="#F59E0B" stroke-opacity=".55"/>
+  <text x="1041" y="378" fill="#FCD34D" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" font-weight="700">BOTH</text>
+
+  <text x="600" y="452" text-anchor="middle" fill="#64748B" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" letter-spacing="1.5">COMPARE SAFELY  ·  BUILD EXPLICITLY  ·  REVIEW WITH EVIDENCE</text>
+</svg>
