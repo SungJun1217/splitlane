@@ -158,7 +158,7 @@ Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
 | Control | `Ctrl+A` approvals · `Ctrl+X` cancel focused lane · `Ctrl+K` queue |
 | Advanced | `Option/Alt+H` role handoff · `Ctrl+L` isolated worktrees |
 | Settings | `Option/Alt+M` models · `Ctrl+O` roles · `Ctrl+P` capabilities · `Ctrl+U` config |
-| Lifecycle | `Ctrl+N` reset focused session · `Ctrl+Q` close and exit |
+| Lifecycle | `Ctrl+D` adapter diagnostics · `Ctrl+N` reset focused session · `Ctrl+Q` close and exit |
 
 When a selected lane is busy, Splitlane sends nothing until you explicitly
 queue or cancel the whole request. A `BROADCAST` request remains one atomic queue

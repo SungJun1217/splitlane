@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand, type CommandResult } from "../process/child.ts";
@@ -222,6 +222,15 @@ function overall(providers: readonly ProviderDoctorReport[]): DoctorStatus {
 }
 
 async function doctorWorkspace(projectRoot: string): Promise<DoctorReport["workspace"]> {
+  const exists = await stat(projectRoot).then((entry) => entry.isDirectory(), () => null);
+  if (exists !== true) {
+    return {
+      status: "fail",
+      checks: [check("git_root", "fail", exists === null
+        ? "Selected project path does not exist."
+        : "Selected project path is not a directory.")],
+    };
+  }
   const top = await runCommand("git", ["rev-parse", "--show-toplevel"], {
     cwd: projectRoot,
     timeoutMs: 5_000,

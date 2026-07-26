@@ -417,6 +417,12 @@ export class CompareOrchestrator {
     this.#patch({ notice: sanitizeTerminalText(message).trim().slice(0, 1_024) || null });
   }
 
+  /** A notice describes one past decision, not current state. Clearing it keeps
+   * a stale refusal from reading as the lane's present condition. */
+  clearNotice(): void {
+    if (this.#snapshot.notice !== null) this.#patch({ notice: null });
+  }
+
   setModel(provider: ProviderId, model: string): void {
     const requestedModel = model.trim() || "default";
     if (requestedModel.length > 256 || /[\r\n\0]/.test(requestedModel)) {
@@ -786,6 +792,10 @@ export class CompareOrchestrator {
     }
     if (this.#snapshot.writer || this.#snapshot.writerLease || this.#promotionPending) {
       this.#patch({ notice: `A writer lease already belongs to ${this.#snapshot.writer}.` });
+      return false;
+    }
+    if (this.#snapshot.lanes[provider].status === "UNAVAILABLE") {
+      this.#patch({ notice: `${provider} is unavailable; install and authenticate its CLI before granting a writer lease.` });
       return false;
     }
     if (!canAccept(this.#snapshot.lanes[provider])) {

@@ -3,13 +3,23 @@ import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { AppSnapshot, LaneSnapshot, MetaSessionSnapshot, ProviderId, RoleId } from "../domain.ts";
 import type { CompareOrchestrator } from "../core/orchestrator.ts";
 import { providerErrorAction } from "../core/provider-error.ts";
-import { laneOutputHeight, panelHeights, panelWidths, selectLayout, type ViewMode } from "./layout.ts";
+import { fitsTerminal, LANE_CHROME_COMPACT, LANE_CHROME_FULL, laneOutputHeight, laneOutputRows, minimumRows, MIN_COLUMNS, panelHeights, panelWidths, selectLayout, type ViewMode } from "./layout.ts";
 import { fitLines, lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
 
 type Overlay = "flow_start" | "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | "isolated" | null;
 type ComposerMode = "flow" | "direct";
 type InspectorTab = "changes" | "diff" | "file" | "findings";
 const INSPECTOR_TABS: readonly InspectorTab[] = ["changes", "diff", "file", "findings"];
+const FINDINGS_WINDOW = 6;
+const NOTICE_TTL_MS = 12_000;
+
+/** A dispatch can raise an approval before its own promise resolves. Closing
+ * the overlay unconditionally would then dismiss the approval inbox that the
+ * approvals effect just opened, leaving the lane BLOCKED with nothing on
+ * screen, so only the overlay we opened may be closed. */
+export function overlayAfterDispatch(current: Overlay, expected: Overlay): Overlay {
+  return current === expected ? null : current;
+}
 
 const ROLE_IDS: readonly RoleId[] = [
   "scout",
@@ -32,27 +42,27 @@ function statusColor(status: LaneSnapshot["status"]): string {
   return "gray";
 }
 
-function Lane({ lane, meta, focused, height, scrollOffset, compact = false }: { lane: LaneSnapshot; meta: MetaSessionSnapshot; focused: boolean; height: number; scrollOffset: number; compact?: boolean }) {
+function Lane({ lane, meta, focused, height, innerWidth, scrollOffset, compact = false }: { lane: LaneSnapshot; meta: MetaSessionSnapshot; focused: boolean; height: number; innerWidth: number; scrollOffset: number; compact?: boolean }) {
   const latestActivity = lane.activities.at(-1);
-  const outputHeight = Math.max(2, height - (compact ? 4 : 6) - (lane.error ? 2 : 0));
+  const outputHeight = laneOutputRows(height, compact ? LANE_CHROME_COMPACT : LANE_CHROME_FULL, Boolean(lane.error));
   const viewport = scrollWindow(lane.output || (lane.error ? "" : "No output yet."), outputHeight, scrollOffset);
   const providerColor = lane.provider === "claude" ? "blue" : "green";
   return (
-    <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} flexDirection="column" paddingX={1} height={height} flexGrow={1}>
+    <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} flexDirection="column" paddingX={1} height={height} flexGrow={1} overflow="hidden">
       <Box justifyContent="space-between">
         <Text bold color={providerColor}>{focused ? "●" : "○"} {lane.provider === "claude" ? "CLAUDE" : "CODEX"}</Text>
         <Text color={statusColor(lane.status)}>[{lane.status}]</Text>
       </Box>
-      <Text dimColor>model: requested {lane.requestedModel} ({modelSourceLabel(lane.modelSource)}) · effective {lane.effectiveModel ?? "pending"} · session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}{compact && viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : ""}</Text>
+      <Text dimColor wrap="truncate-end">model: requested {lane.requestedModel} ({modelSourceLabel(lane.modelSource)}) · effective {lane.effectiveModel ?? "pending"} · session: {lane.sessionId ? lane.sessionId.slice(0, 10) : "new"}{compact && viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : ""}</Text>
       {!compact ? <>
-        <Text color={meta.pendingEntries[lane.provider] ? "yellow" : "gray"}>shared: {meta.pendingEntries[lane.provider] ? `${meta.pendingEntries[lane.provider]} pending` : "synced"} · last {meta.lastInjectedBytes[lane.provider]} B</Text>
-        <Text color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
+        <Text wrap="truncate-end" color={meta.pendingEntries[lane.provider] ? "yellow" : "gray"}>shared: {meta.pendingEntries[lane.provider] ? `${meta.pendingEntries[lane.provider]} pending` : "synced"} · last {meta.lastInjectedBytes[lane.provider]} B</Text>
+        <Text wrap="truncate-end" color={latestActivity?.status === "failed" ? "red" : latestActivity?.status === "blocked" ? "yellow" : "gray"}>
           {latestActivity ? `${latestActivity.kind} · ${latestActivity.status} · ${latestActivity.title}` : "activity · none"}
           {viewport.offset > 0 ? ` · SCROLLED +${viewport.offset}/${viewport.maxOffset}` : " · FOLLOW TAIL"}
         </Text>
       </> : null}
-      <Text wrap="wrap" dimColor={!lane.output}>{viewport.content}</Text>
-      {lane.error ? <Text color="red">[{lane.errorKind?.toUpperCase() ?? "UNKNOWN"}] {tailLines(lane.error, 1)}{"\n"}{providerErrorAction(lane.errorKind ?? "unknown")}</Text> : null}
+      <Text dimColor={!lane.output}>{fitLines(viewport.content, innerWidth, outputHeight)}</Text>
+      {lane.error ? <Text color="red">{fitLines(`[${lane.errorKind?.toUpperCase() ?? "UNKNOWN"}] ${tailLines(lane.error, 1)}\n${providerErrorAction(lane.errorKind ?? "unknown")}`, innerWidth, 2)}</Text> : null}
     </Box>
   );
 }
@@ -128,14 +138,18 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
 }) {
   if (overlay === "flow_start") {
     const visibleDirtyFiles = snapshot.git.files.slice(0, 5);
+    const unavailable = (["codex", "claude"] as const).filter((provider) => snapshot.lanes[provider].status === "UNAVAILABLE");
     return (
-      <Box borderStyle="double" borderColor="cyan" flexDirection="column" paddingX={1}>
+      <Box borderStyle="double" borderColor={unavailable.includes("codex") ? "red" : "cyan"} flexDirection="column" paddingX={1}>
         <Text bold>TASK FLOW · CODEX BUILD → CLAUDE CHALLENGE · {writerConfirm ? "CONFIRM" : "REVIEW"}</Text>
         <Text>task: {tailLines(taskPrompt, 3)}</Text>
-        <Text>workspace: {snapshot.git.root || "not a Git repository"}</Text>
-        <Text>current changes: {snapshot.git.dirty ? `${visibleDirtyFiles.join(", ")}${snapshot.git.files.length > 5 ? ` (+${snapshot.git.files.length - 5} more)` : ""}` : "clean"}</Text>
+        <Text wrap="truncate-end">workspace: {snapshot.git.root || "not a Git repository"}</Text>
+        <Text wrap="truncate-end">current changes: {snapshot.git.dirty ? `${visibleDirtyFiles.join(", ")}${snapshot.git.files.length > 5 ? ` (+${snapshot.git.files.length - 5} more)` : ""}` : "clean"}</Text>
         <Text color="yellow">Codex is the only writer · network off · completion prepares a separate Claude challenge confirmation.</Text>
-        <Text dimColor>{writerConfirm ? "Enter grant Codex lease and start · Esc close" : "Enter review final confirmation · Esc close · Option+D uses direct mode"}</Text>
+        {unavailable.length ? <Text color="red">unavailable: {unavailable.join(" + ")} · run splitlane doctor · Ctrl+D shows the adapter error</Text> : null}
+        <Text dimColor wrap="truncate-end">{unavailable.includes("codex")
+          ? "Codex cannot build while unavailable · Esc close · Option+D uses direct mode"
+          : writerConfirm ? "Enter grant Codex lease and start · Esc close" : "Enter review final confirmation · Esc close · Option+D uses direct mode"}</Text>
       </Box>
     );
   }
@@ -227,18 +241,28 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
   }
   if (overlay === "findings") {
     const review = snapshot.review;
-    const finding = review?.findings[findingIndex] ?? review?.findings[0];
+    const findings = review?.findings ?? [];
+    const index = Math.min(findingIndex, Math.max(0, findings.length - 1));
+    const finding = findings[index];
+    const selectedCount = findings.filter((item) => item.selected).length;
+    const start = Math.max(0, Math.min(index - 2, Math.max(0, findings.length - FINDINGS_WINDOW)));
     return (
       <Box borderStyle="double" borderColor={review?.stale ? "red" : "magenta"} flexDirection="column" paddingX={1}>
-        <Text bold>REVIEW FINDINGS · {review?.status.toUpperCase() ?? "NONE"} · {review?.stale ? "STALE" : "CURRENT"}</Text>
-        {review?.twoLens ? <Text>lens: {review.activeLens.toUpperCase()} · Claude {review.lenses.claude?.status} · Codex {review.lenses.codex?.status} · never merged/graded</Text> : null}
-        {finding ? <>
-          <Text>{finding.selected ? "[x]" : "[ ]"} {finding.severity.toUpperCase()} · {finding.title}</Text>
-          <Text>{finding.file ?? "general"}{finding.lineStart ? `:${finding.lineStart}` : ""}</Text>
-          <Text>{tailLines(finding.body, 5)}</Text>
-          {finding.verification ? <Text dimColor>verify: {finding.verification}</Text> : null}
-        </> : <Text>{review?.parseError ?? (review?.status === "running" ? "Review is running…" : "No structured findings.")}</Text>}
-        <Text dimColor>{review?.twoLens ? "Tab lens · " : ""}↑/↓ finding · Space select · A accept · E exit · S stale ack ({staleAcknowledged ? "yes" : "no"}) · R return selected</Text>
+        <Text bold>REVIEW FINDINGS · {review?.status.toUpperCase() ?? "NONE"} · {review?.stale ? "STALE" : "CURRENT"} · {findings.length ? `${index + 1}/${findings.length}` : "0"} · {selectedCount} selected</Text>
+        {review?.twoLens ? <Text wrap="truncate-end">lens: {review.activeLens.toUpperCase()} · Claude {review.lenses.claude?.status} · Codex {review.lenses.codex?.status} · never merged/graded</Text> : null}
+        {findings.length ? findings.slice(start, start + FINDINGS_WINDOW).map((item, offset) => {
+          const position = start + offset;
+          const location = item.file ? `${item.file}${item.lineStart ? `:${item.lineStart}` : ""}` : "general";
+          return <Text key={item.id} wrap="truncate-end" color={position === index ? "cyan" : item.severity === "blocker" || item.severity === "high" ? "red" : "white"}>
+            {position === index ? ">" : " "} {item.selected ? "[x]" : "[ ]"} {item.severity.toUpperCase()} · {item.title} · {location}
+          </Text>;
+        }) : <Text wrap="truncate-end">{review?.parseError ?? (review?.status === "running" ? "Review is running…" : "No structured findings.")}</Text>}
+        {findings.length > FINDINGS_WINDOW ? <Text dimColor>showing {start + 1}–{Math.min(findings.length, start + FINDINGS_WINDOW)} of {findings.length}</Text> : null}
+        {finding ? <Box borderStyle="single" borderColor="gray" flexDirection="column" paddingX={1}>
+          <Text>{tailLines(finding.body, 3)}</Text>
+          {finding.verification ? <Text dimColor wrap="truncate-end">verify: {finding.verification}</Text> : null}
+        </Box> : null}
+        <Text dimColor wrap="truncate-end">{review?.twoLens ? "Tab lens · " : ""}↑/↓ finding · Space select · A accept · E exit · S stale ack ({staleAcknowledged ? "yes" : "no"}) · R return selected</Text>
       </Box>
     );
   }
@@ -276,8 +300,8 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
         <Text>Evidence: Option+I inspector · Tab focus · [/] tabs · ↑/↓ file · Ctrl+T activity</Text>
         <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Option+H handoff · Ctrl+L isolated</Text>
-        <Text>Controls: Ctrl+A approvals · Option+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
-        <Text>Lifecycle: Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
+        <Text>Controls: Ctrl+A approvals · Ctrl+K queue · Option+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
+        <Text>Lifecycle: Ctrl+D diagnostics · Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text>Meta session: provider-only turns sync lazily; parallel peer results arrive next ordinary turn</Text>
         <Text color="yellow">Unavailable actions do nothing and preserve the current safety mode.</Text>
         <Text dimColor>Ctrl+G/Esc close</Text>
@@ -450,35 +474,62 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
   const footer = composerMode === "flow"
     ? "Enter flow · ⌥D direct · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit"
     : "Enter send · ^R route · ⌥D flow · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit";
+  const laneInnerWidth = Math.max(10, (layout === "focused" ? columns : widths.lanes) - 4);
+  const requiredRows = minimumRows(Math.max(columns, MIN_COLUMNS), viewMode, Boolean(snapshot.notice));
+  if (!fitsTerminal(columns, rows, viewMode, Boolean(snapshot.notice))) {
+    return (
+      <Box flexDirection="column" height={rows} overflow="hidden">
+        <Text bold color="cyan" wrap="truncate-end">◆ SPLITLANE · TERMINAL TOO SMALL</Text>
+        <Text wrap="truncate-end"><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer ? "yellow" : "gray"}>{writerLabel}</Text> · C [{snapshot.lanes.claude.status}] · X [{snapshot.lanes.codex.status}]</Text>
+        <Text color="yellow" wrap="truncate-end">{columns}×{rows} · needs at least {Math.max(columns, MIN_COLUMNS)}×{requiredRows}</Text>
+        <Text dimColor wrap="truncate-end">Resize the terminal · ^Q quit</Text>
+      </Box>
+    );
+  }
+  // A modal owns input, but the lanes it hides may still be running. Keep one
+  // truncated status row per lane when the tallest overlay still leaves room
+  // for the notice and footer.
+  const showLaneStrip = Boolean(overlay) && rows >= requiredRows + 6;
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" height={rows} overflow="hidden">
       {compact ? <>
-        <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · FOCUS {focusedLabel}</Text> · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
-        <Text><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " REVOKING" : ""}</Text>{pausedWriter} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals {snapshot.approvals.length} · queue {snapshot.queue.length}</Text>
-        <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · memory {snapshot.metaSession.retainedBytes} B</Text>
-        <Text dimColor>{composerMode === "flow" ? "flow CODEX → CLAUDE · manual" : `direct ${sendLabel} · ^R route · ⌥D flow`} · roles {roleSummary}</Text>
+        <Text bold color="cyan" wrap="truncate-end">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · FOCUS {focusedLabel}</Text> · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
+        <Text wrap="truncate-end"><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " REVOKING" : ""}</Text>{pausedWriter} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals {snapshot.approvals.length} · queue {snapshot.queue.length}</Text>
+        <Text wrap="truncate-end" color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · memory {snapshot.metaSession.retainedBytes} B</Text>
+        <Text dimColor wrap="truncate-end">{composerMode === "flow" ? "flow CODEX → CLAUDE · manual" : `direct ${sendLabel} · ^R route · ⌥D flow`} · roles {roleSummary}</Text>
       </> : <>
         <Box justifyContent="space-between" flexDirection="row">
-          <Text bold color="cyan">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · {layoutLabel}</Text></Text>
-          <Text><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text></Text>
+          <Text bold color="cyan" wrap="truncate-end">◆ SPLITLANE <Text dimColor>· VIEW {viewMode.toUpperCase()} · {layoutLabel}</Text></Text>
+          <Text wrap="truncate-end"><Text color="green">{snapshot.mode.toUpperCase()}</Text> · writer <Text color={snapshot.writer || snapshot.mode === "isolated" ? "yellow" : "gray"}>{writerLabel}{snapshot.writerRevoking ? " (REVOKING)" : ""}</Text>{snapshot.mode === "review" && snapshot.review ? <Text> · paused <Text color="yellow">{snapshot.review.writer.toUpperCase()}</Text></Text> : null} · {composerMode === "flow" ? "task" : "send"} <Text bold color={snapshot.target === "both" ? "yellow" : "cyan"}>{composerLabel}</Text> · approvals <Text color={snapshot.approvals.length ? "yellow" : "gray"}>{snapshot.approvals.length}</Text> · queue <Text color={snapshot.queue.length ? "yellow" : "gray"}>{snapshot.queue.length}</Text></Text>
         </Box>
-        <Text color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · memory {snapshot.metaSession.retainedBytes} B · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
-        <Text dimColor>{composerMode === "flow" ? "flow CODEX BUILD → CLAUDE CHALLENGE · manual gates" : `direct route ${sendLabel} · ^R change · ⌥D task flow`} · roles {roleSummary} · ^O edit</Text>
+        <Text wrap="truncate-end" color={snapshot.metaSession.pendingEntries.claude || snapshot.metaSession.pendingEntries.codex ? "yellow" : "gray"}>meta <Text bold>{snapshot.metaSession.id.slice(0, 8)}</Text>/e{snapshot.metaSession.epoch}{snapshot.metaSession.restoredEpoch ? " RESTORED" : ""} · turns {snapshot.metaSession.turnCount} · memory {snapshot.metaSession.retainedBytes} B · pending C{snapshot.metaSession.pendingEntries.claude}/X{snapshot.metaSession.pendingEntries.codex} · C <Text color={statusColor(snapshot.lanes.claude.status)}>[{snapshot.lanes.claude.status}]</Text> · X <Text color={statusColor(snapshot.lanes.codex.status)}>[{snapshot.lanes.codex.status}]</Text></Text>
+        <Text dimColor wrap="truncate-end">{composerMode === "flow" ? "flow CODEX BUILD → CLAUDE CHALLENGE · manual gates" : `direct route ${sendLabel} · ^R change · ⌥D task flow`} · roles {roleSummary} · ^O edit</Text>
       </>}
+      {showLaneStrip ? (["claude", "codex"] as const).map((provider) => {
+        const lane = snapshot.lanes[provider];
+        const activity = lane.activities.at(-1);
+        const detail = activity ? `${activity.kind} · ${activity.status} · ${activity.title}` : tailLines(lane.output, 1) || "no output yet";
+        return <Text key={provider} wrap="truncate-end" dimColor={lane.status === "READY"}>
+          {provider === "claude" ? "C" : "X"} <Text color={statusColor(lane.status)}>[{lane.status}]</Text> {detail}
+        </Text>;
+      }) : null}
       {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} taskPrompt={prompt} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
-        <Box flexDirection={outerDirection} gap={1} height={heights.content}>
+        <Box flexDirection={outerDirection} gap={1} height={heights.content} overflow="hidden">
           <Box flexDirection="column" width={layout === "focused" ? undefined : widths.lanes} flexGrow={heights.showInspector ? 2 : 1} gap={1}>
-            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={heights.lane} scrollOffset={scrollOffsets[provider]} compact={compactBoth} />)}
+            {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={heights.lane} innerWidth={laneInnerWidth} scrollOffset={scrollOffsets[provider]} compact={compactBoth} />)}
           </Box>
           {heights.showInspector ? <Inspector snapshot={snapshot} height={heights.inspector} width={layout === "focused" ? undefined : widths.inspector} tab={inspectorTab} focused={inspectorFocused} evidenceIndex={evidenceIndex} /> : null}
         </Box>
       )}
-      {overlay ? <Text dimColor>Modal open · follow the actions above · Esc close · ^Q quit</Text> : <>
+      {overlay ? <>
+        {snapshot.notice ? <Text color="yellow" wrap="truncate-end">{snapshot.notice}</Text> : null}
+        <Text dimColor wrap="truncate-end">Modal open · follow the actions above · Esc close · ^Q quit</Text>
+      </> : <>
         <Box borderStyle="round" borderColor={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"} paddingX={1}>
-          <Text bold color={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"}> {composerLabel} </Text><Text dimColor={!prompt}>{prompt || (composerMode === "flow" ? "Describe the implementation task…" : "Type a direct prompt…")}</Text>
+          <Text bold color={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"}> {composerLabel} </Text><Text wrap="truncate-start" dimColor={!prompt}>{prompt || (composerMode === "flow" ? "Describe the implementation task…" : "Type a direct prompt…")}</Text>
         </Box>
-        {snapshot.notice ? <Text color="yellow">{snapshot.notice}</Text> : null}
-        <Text dimColor>{footer}</Text>
+        {snapshot.notice ? <Text color="yellow" wrap="truncate-end">{snapshot.notice}</Text> : null}
+        <Text dimColor wrap="truncate-end">{footer}</Text>
       </>}
     </Box>
   );
@@ -565,6 +616,12 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   }, [snapshot.git.files.join("\0")]);
 
   useEffect(() => {
+    if (!snapshot.notice) return;
+    const timer = setTimeout(() => orchestrator.clearNotice(), NOTICE_TTL_MS);
+    return () => clearTimeout(timer);
+  }, [snapshot.notice]);
+
+  useEffect(() => {
     if (!guidedBuildActive) return;
     const status = snapshot.lanes.codex.status;
     if (status === "COMPLETED" && snapshot.mode === "build" && snapshot.writer === "codex") {
@@ -578,6 +635,8 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       orchestrator.showNotice(`Task flow stopped after Codex ${status.toLowerCase()}; Claude challenge was not started.`);
     }
   }, [guidedBuildActive, snapshot.lanes.codex.status, snapshot.mode, snapshot.writer]);
+
+  const closeOverlayIfStill = (expected: Overlay) => setOverlay((current) => overlayAfterDispatch(current, expected));
 
   useInput((input, key) => {
     if (key.ctrl && input === "q") {
@@ -612,7 +671,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
           if (started) {
             setPrompt("");
             setGuidedBuildActive(true);
-            setOverlay(null);
+            closeOverlayIfStill("flow_start");
             setWriterConfirm(false);
           }
         });
@@ -701,7 +760,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       else if (key.return) {
         void orchestrator.promoteWriter(writerProvider, snapshot.git.dirty).then((promoted) => {
           if (promoted) {
-            setOverlay(null);
+            closeOverlayIfStill("writer");
             setWriterConfirm(false);
           }
         });
@@ -726,9 +785,9 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
         const next = mechanisms[(index + 1) % mechanisms.length];
         if (next) orchestrator.setReviewMechanism(next);
       } else if (input.toLowerCase() === "t") {
-        void orchestrator.startTwoLensReview(reviewCriteria).then((started) => { if (started) setOverlay(null); });
+        void orchestrator.startTwoLensReview(reviewCriteria).then((started) => { if (started) closeOverlayIfStill("review"); });
       } else if (key.return) {
-        void orchestrator.startReview(reviewCriteria).then((started) => { if (started) setOverlay(null); });
+        void orchestrator.startReview(reviewCriteria).then((started) => { if (started) closeOverlayIfStill("review"); });
       } else if (key.backspace || key.delete) setReviewCriteria(removeLastGrapheme(reviewCriteria));
       else if (!key.ctrl && !key.meta) setReviewCriteria((current) => current + input);
       return;
@@ -861,6 +920,9 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     else if (key.meta && input.toLowerCase() === "i") {
       if (snapshot.inspectorVisible) setInspectorFocused(false);
       orchestrator.toggleInspector();
+      if (!panelHeights(columns, rows, !snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode).showInspector) {
+        orchestrator.showNotice(`Evidence inspector needs 100+ columns; this terminal is ${columns}. Option+0 focuses one lane.`);
+      }
     }
     else if (key.ctrl && input === "v") {
       setReviewCriteria("");

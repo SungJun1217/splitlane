@@ -488,3 +488,47 @@ or authorize paid live model turns.
 - Flow and direct status copy now reflects the active composer mode. A 240×60
   PTY check verified stable hierarchy, focus-only `Option/Alt+1`, direct Codex
   routing after the focus change, and clean shutdown without a model turn.
+
+### 2026-07-27 — Small-terminal and modal visibility audit
+
+A scripted PTY sweep across 80 and 140 columns at 10–30 rows, plus scenario runs
+driven by fake adapters, found six defects. All are corrected without changing
+routing, authority, or any safety invariant.
+
+- **Height contract.** Below 18 rows (80 columns) and 19 rows (140 columns) the
+  declared panel heights exceeded the terminal: lane text overprinted borders and
+  at 80×12 the mode and writer header scrolled off screen. `contentHeight` no
+  longer floors at 5 rows and lane output no longer floors at 2, `layout.ts` now
+  publishes `laneChrome`, `minimumRows`, `fitsTerminal`, and `laneOutputRows`, and
+  the root and lane boxes carry an explicit height with `overflow: hidden`. Header,
+  footer, notice, composer, and lane rows truncate instead of wrapping, so no
+  string length can inflate the row budget. Below the minimum the TUI renders a
+  `TERMINAL TOO SMALL` screen that still shows workspace mode, writer, both lane
+  states, the required size, and `Ctrl+Q`.
+- **Approval visibility.** A dispatch can raise an approval before its own promise
+  resolves, and the unconditional `setOverlay(null)` in the guided-build, writer,
+  and review handlers dismissed the approval inbox the effect had just opened,
+  leaving the writer lane `BLOCKED` with no modal. Those handlers now close only
+  the overlay they opened.
+- **Refusal visibility.** `snapshot.notice` rendered only when no modal was open,
+  so every refusal raised by a modal action was invisible — the guided flow could
+  reach the writer confirmation with an unavailable provider and then do nothing.
+  Notices now render under modals as well.
+- **Running lanes under a modal.** A modal blanked the whole workspace. One
+  truncated status row per lane now stays visible whenever the terminal has room
+  for it.
+- **Unavailable providers.** `promoteWriter` reported an unavailable lane as
+  "active"; it now names discovery, and the guided-flow confirmation marks
+  unavailable lanes before the final gate.
+- **Findings, shortcuts, and stale notices.** The findings overlay lists all
+  findings with a cursor, count, and position instead of one at a time. `Ctrl+D`
+  and `Ctrl+K` are documented in the help overlay and README, with a test that
+  asserts every bound `Ctrl` key is documented in both. Notices expire after 12
+  seconds so a past refusal stops reading as current state, and doctor separates a
+  missing project path from an unreadable repository.
+
+Verification: `tsc --noEmit`, 95 offline production tests plus the spike suite,
+Bun bundle and standalone compilation, a 24-size PTY sweep with zero overprinted
+border rows, and scenario runs covering broadcast streaming, lane-local
+cancellation, atomic queue refusal, writer grant with an approval inbox, and
+two-finding review. No run started a provider model turn.

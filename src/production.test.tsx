@@ -1,4 +1,5 @@
 import React from "react";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,8 +27,22 @@ import { ClaudeAdapter, claudePermissionResult, parseClaudeMessage } from "./pro
 import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCodexNotification, supportsCodexNativeReviewSchema } from "./providers/codex.ts";
 import { CodexRpcClient } from "./providers/codex-rpc.ts";
 import { GitObserver, parseStatus } from "./git/observer.ts";
-import { SplitlaneView } from "./ui/app.tsx";
-import { contentHeight, headerHeight, laneOutputHeight, panelHeights, panelWidths, selectLayout } from "./ui/layout.ts";
+import { overlayAfterDispatch, SplitlaneView } from "./ui/app.tsx";
+import {
+  contentHeight,
+  fitsTerminal,
+  headerHeight,
+  LANE_CHROME_COMPACT,
+  LANE_CHROME_FULL,
+  laneChrome,
+  laneOutputHeight,
+  laneOutputRows,
+  MIN_COLUMNS,
+  minimumRows,
+  panelHeights,
+  panelWidths,
+  selectLayout,
+} from "./ui/layout.ts";
 import { fitLines, removeLastGrapheme, scrollWindow, truncateLine } from "./ui/text.ts";
 import { WorkspaceGuard, isPathInsideWorkspace } from "./workspace/guard.ts";
 import { captureReviewPatch, createReviewEnvelope, REVIEW_PATCH_LIMIT } from "./review/envelope.ts";
@@ -56,8 +71,12 @@ class FakeAdapter implements ProviderAdapter {
     this.reviewMechanisms = provider === "codex" && nativeReview ? ["codex_native", "codex_generic"] : [`${provider}_generic`];
   }
 
+  available = true;
+
   async probe(): Promise<ProviderProbe> {
-    return { provider: this.provider, available: true, version: "fake/1", error: null };
+    return this.available
+      ? { provider: this.provider, available: true, version: "fake/1", error: null }
+      : { provider: this.provider, available: false, version: null, error: `${this.provider} binary not found` };
   }
 
   async startSession(options: SessionOptions): Promise<SessionHandle> {
@@ -1284,6 +1303,270 @@ describe("terminal rendering", () => {
     );
     expect(twoLens).toContain("Claude failed · Codex completed");
     expect(twoLens).toContain("never merged/graded");
+  });
+});
+
+describe("layout safety and modal visibility", () => {
+  function busySnapshot(orchestrator: CompareOrchestrator): AppSnapshot {
+    const base = orchestrator.getSnapshot();
+    const output = Array.from({ length: 40 }, (_, index) => `${index + 1}번째 아주 긴 줄 · ${"긴".repeat(60)} · tail`).join("\n");
+    return {
+      ...base,
+      notice: "쓰기 권한 요청이 거부되었습니다. 승인 인박스를 확인하세요. ".repeat(4),
+      lanes: {
+        claude: { ...base.lanes.claude, status: "RUNNING", output, error: "provider stream stalled ".repeat(10), errorKind: "protocol" },
+        codex: { ...base.lanes.codex, status: "BLOCKED", output },
+      },
+    };
+  }
+
+  test("no terminal size renders more rows or columns than the terminal has", () => {
+    const { orchestrator } = setup();
+    const snapshot = busySnapshot(orchestrator);
+    const overlays = [null, "help", "actions"] as const;
+    const overflows: string[] = [];
+    for (const columns of [40, 80, 140, 240]) {
+      for (const rows of [8, 16, 19, 22, 45]) {
+        for (const viewMode of ["both", "focused"] as const) {
+          for (const overlay of overlays) {
+            const output = renderToString(
+              <SplitlaneView snapshot={snapshot} prompt={"긴 프롬프트 ".repeat(40)} columns={columns} rows={rows} viewMode={viewMode} overlay={overlay} />,
+              { columns },
+            );
+            const lines = output.split("\n");
+            const widest = Math.max(...lines.map((line) => stringWidth(line)));
+            if (lines.length > rows || widest > columns) {
+              overflows.push(`${columns}x${rows} ${viewMode} ${overlay ?? "no-overlay"}: ${lines.length} rows, ${widest} cols`);
+            }
+          }
+        }
+      }
+    }
+    expect(overflows).toEqual([]);
+  }, 30_000);
+
+  test("a border row never carries the text of its own panel", () => {
+    const { orchestrator } = setup();
+    const snapshot = busySnapshot(orchestrator);
+    for (const columns of [60, 80, 140]) {
+      for (const rows of [19, 20, 22, 24, 30]) {
+        const output = renderToString(<SplitlaneView snapshot={snapshot} prompt="" columns={columns} rows={rows} />, { columns });
+        for (const line of output.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed || !"╭╰╔╚".includes(trimmed[0] ?? "")) continue;
+          const closers = [..."╯╝╮╗"].map((char) => trimmed.indexOf(char)).filter((index) => index >= 0);
+          const segment = trimmed.slice(0, Math.min(...closers, trimmed.length - 1) + 1);
+          expect(segment).not.toMatch(/[A-Za-z]{3,}/);
+        }
+      }
+    }
+  });
+
+  test("declares the smallest usable size and keeps authority visible below it", () => {
+    expect(minimumRows(140)).toBe(3 + (LANE_CHROME_FULL + 1) * 2 + 1 + 3 + 1);
+    expect(minimumRows(80)).toBe(4 + (LANE_CHROME_COMPACT + 1) * 2 + 1 + 3 + 1);
+    expect(minimumRows(140, "focused")).toBeLessThan(minimumRows(140, "both"));
+    expect(minimumRows(80, "both", true)).toBe(minimumRows(80, "both") + 1);
+    expect(fitsTerminal(140, minimumRows(140))).toBe(true);
+    expect(fitsTerminal(140, minimumRows(140) - 1)).toBe(false);
+    expect(fitsTerminal(MIN_COLUMNS - 1, 60)).toBe(false);
+
+    const { orchestrator } = setup();
+    const tooSmall = renderToString(
+      <SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={50} rows={14} />,
+      { columns: 50 },
+    );
+    expect(tooSmall).toContain("TERMINAL TOO SMALL");
+    expect(tooSmall).toContain("COMPARE");
+    expect(tooSmall).toContain("writer NONE");
+    expect(tooSmall).toContain("50×14");
+    expect(tooSmall).toContain(`${MIN_COLUMNS}×${minimumRows(MIN_COLUMNS)}`);
+    expect(tooSmall).toContain("^Q quit");
+    expect(tooSmall.split("\n").length).toBeLessThanOrEqual(14);
+  });
+
+  test("lane output rows never exceed the declared lane height", () => {
+    for (const columns of [80, 140]) {
+      for (const rows of [minimumRows(columns), 24, 30, 45]) {
+        const { lane } = panelHeights(columns, rows, true, false, "both");
+        const chrome = laneChrome(columns, "both");
+        expect(laneOutputRows(lane, chrome, false)).toBeLessThanOrEqual(lane - chrome);
+        expect(laneOutputHeight(columns, rows, true, false, false, "both")).toBeLessThanOrEqual(lane - chrome);
+      }
+    }
+  });
+
+  test("a modal keeps the refusal notice and every lane status on screen", () => {
+    const { orchestrator } = setup();
+    const base = orchestrator.getSnapshot();
+    const snapshot: AppSnapshot = {
+      ...base,
+      notice: "codex is unavailable; install and authenticate its CLI before granting a writer lease.",
+      lanes: {
+        claude: { ...base.lanes.claude, status: "RUNNING", output: "claude> still streaming" },
+        codex: { ...base.lanes.codex, status: "BLOCKED" },
+      },
+    };
+    const output = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="task" columns={140} rows={40} overlay="flow_start" writerConfirm />,
+      { columns: 140 },
+    );
+    expect(output).toContain("codex is unavailable");
+    expect(output).toContain("C [RUNNING]");
+    expect(output).toContain("X [BLOCKED]");
+    expect(output).toContain("Modal open");
+  });
+
+  test("an unavailable lane blocks the guided flow before the writer confirmation", () => {
+    const { orchestrator } = setup();
+    const base = orchestrator.getSnapshot();
+    const snapshot: AppSnapshot = {
+      ...base,
+      lanes: { ...base.lanes, codex: { ...base.lanes.codex, status: "UNAVAILABLE", error: "Codex binary not found", errorKind: "discovery" } },
+    };
+    const output = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="build it" columns={140} rows={40} overlay="flow_start" writerConfirm />,
+      { columns: 140 },
+    );
+    expect(output).toContain("unavailable: codex");
+    expect(output).toContain("Codex cannot build while unavailable");
+    expect(output).not.toContain("Enter grant Codex lease and start");
+  });
+
+  test("an approval raised during dispatch survives the dispatch promise", () => {
+    expect(overlayAfterDispatch("flow_start", "flow_start")).toBeNull();
+    expect(overlayAfterDispatch("writer", "writer")).toBeNull();
+    expect(overlayAfterDispatch("approval", "flow_start")).toBe("approval");
+    expect(overlayAfterDispatch("approval", "writer")).toBe("approval");
+    expect(overlayAfterDispatch("approval", "review")).toBe("approval");
+    expect(overlayAfterDispatch(null, "flow_start")).toBeNull();
+  });
+
+  test("promoting an unavailable lane names discovery instead of lane activity", async () => {
+    const { orchestrator, codex } = setup();
+    codex.available = false;
+    await orchestrator.initialize();
+    expect(orchestrator.getSnapshot().lanes.codex.status).toBe("UNAVAILABLE");
+    expect(await orchestrator.promoteWriter("codex", true)).toBe(false);
+    expect(orchestrator.getSnapshot().notice).toContain("codex is unavailable");
+    expect(orchestrator.getSnapshot().notice).not.toContain("while its lane is active");
+    expect(orchestrator.getSnapshot().writer).toBeNull();
+    expect(orchestrator.getSnapshot().mode).toBe("compare");
+  });
+
+  test("a notice can be cleared so a past refusal stops reading as current state", () => {
+    const { orchestrator } = setup();
+    orchestrator.showNotice("codex has no cancellable turn.");
+    expect(orchestrator.getSnapshot().notice).toBe("codex has no cancellable turn.");
+    orchestrator.clearNotice();
+    expect(orchestrator.getSnapshot().notice).toBeNull();
+  });
+
+  test("findings are navigable with a visible count and position", () => {
+    const { orchestrator } = setup();
+    const base = orchestrator.getSnapshot();
+    const envelope = {
+      schemaVersion: "review-envelope/v1" as const,
+      id: "envelope-1",
+      createdAt: new Date(0).toISOString(),
+      writer: "codex" as const,
+      reviewer: "claude" as const,
+      mechanism: "claude_generic" as const,
+      mechanismStability: "stable" as const,
+      objective: "guard the layout",
+      acceptanceCriteria: "no border overprint",
+      projectRoot: process.cwd(),
+      branch: "main",
+      head: "abc123",
+      baselineFingerprint: "fp",
+      files: [],
+      diff: "",
+      diffBytes: 0,
+      diffHash: "hash",
+      truncated: false as const,
+    };
+    const findings = Array.from({ length: 9 }, (_, index) => ({
+      id: `finding-${index + 1}`,
+      provider: "claude" as const,
+      mechanism: "claude_generic" as const,
+      severity: index === 0 ? ("blocker" as const) : ("low" as const),
+      title: `발견 ${index + 1}`,
+      body: `본문 ${index + 1}`,
+      file: `src/file-${index + 1}.ts`,
+      lineStart: index + 1,
+      lineEnd: index + 1,
+      verification: "bun test",
+      selected: index === 1,
+    }));
+    const snapshot: AppSnapshot = {
+      ...base,
+      mode: "review",
+      review: {
+        status: "completed",
+        writer: "codex",
+        reviewer: "claude",
+        mechanism: "claude_generic",
+        availableMechanisms: ["claude_generic"],
+        envelope,
+        findings,
+        activeFindingId: findings[4]!.id,
+        preview: null,
+        stale: false,
+        parseError: null,
+        twoLens: false,
+        activeLens: "claude",
+        lenses: {},
+      },
+    };
+    const output = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="" columns={140} rows={40} overlay="findings" findingIndex={4} />,
+      { columns: 140 },
+    );
+    expect(output).toContain("5/9");
+    expect(output).toContain("1 selected");
+    expect(output).toContain("> [ ] LOW · 발견 5");
+    expect(output).toContain("발견 4");
+    expect(output).toContain("발견 6");
+    expect(output).toContain("본문 5");
+    expect(output).toContain("of 9");
+    expect(output.split("\n").length).toBeLessThanOrEqual(40);
+  });
+
+  test("the help overlay documents every keyboard action the app binds", () => {
+    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
+    const handler = source.slice(source.indexOf("useInput((input, key)"));
+    const bound = new Set([...handler.matchAll(/key\.ctrl && input === "([a-z])"/g)].map((match) => match[1]!.toUpperCase()));
+    const { orchestrator } = setup();
+    const help = renderToString(
+      <SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={140} rows={40} overlay="help" />,
+      { columns: 140 },
+    );
+    expect(bound.size).toBeGreaterThan(10);
+    for (const key of bound) expect(help).toContain(`Ctrl+${key}`);
+    expect(help).toContain("Ctrl+D diagnostics");
+    expect(help).toContain("Ctrl+K queue");
+    const readme = readFileSync(join(process.cwd(), "README.md"), "utf8");
+    for (const key of bound) expect(readme).toContain(`Ctrl+${key}`);
+  });
+
+  test("doctor separates a missing project path from an unreadable repository", async () => {
+    const fixture = join(process.cwd(), "test", "fixtures", "fake-doctor-provider.mjs");
+    const providers = {
+      claude: { command: process.execPath, argsPrefix: [fixture, "claude"] },
+      codex: { command: process.execPath, argsPrefix: [fixture, "codex"] },
+    };
+    const missing = await runDoctor({ projectRoot: join(tmpdir(), `splitlane-absent-${process.pid}`), ...providers });
+    expect(missing.status).toBe("fail");
+    expect(missing.workspace.checks[0]).toMatchObject({ id: "git_root", status: "fail" });
+    expect(missing.workspace.checks[0]?.detail).toContain("does not exist");
+
+    const nonGit = await mkdtemp(join(tmpdir(), "splitlane-doctor-plain-"));
+    try {
+      const report = await runDoctor({ projectRoot: nonGit, ...providers });
+      expect(report.workspace.checks[0]?.detail).toContain("not a readable Git repository");
+    } finally {
+      await rm(nonGit, { recursive: true, force: true });
+    }
   });
 });
 
