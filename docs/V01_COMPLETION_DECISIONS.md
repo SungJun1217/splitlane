@@ -131,6 +131,27 @@ The user explicitly approved this revision on 2026-07-27 after clarifying that
 Splitlane must behave as one shared meta conversation rather than two merely
 adjacent conversations.
 
+### 2026-07-27 approved revision — standalone automatic updates
+
+- GitHub Release standalone installs default to background `auto` checks on TUI
+  startup, limited to once per 24 hours. Checks contact only the public
+  Splitlane release endpoint and send no telemetry.
+- Installation happens beside the current regular, non-symlink executable.
+  Stable SemVer, platform asset name, bounded download, published SHA-256, and
+  downloaded `--version` must all match before an atomic rename. Failure leaves
+  the running and on-disk current version intact.
+- An installed update never restarts the TUI or either provider. It becomes
+  active on the next Splitlane launch and produces a visible restart notice.
+- `splitlane update` performs an explicit immediate check. The user config key
+  `updates.mode` accepts `auto`, `notify`, or `off`; project config cannot
+  control executable updates. `SPLITLANE_DISABLE_AUTOUPDATE=1` disables only
+  background auto-checks.
+- Source runs, package-managed/symlink paths, unsupported platforms, and
+  unwritable destinations are not modified automatically.
+
+The user explicitly approved automatic updates on 2026-07-27, asking for
+Claude Code-like behavior after the `v0.0.4` standalone release.
+
 ## 5. Two-lens review and role handoff contract
 
 - Two-lens review freezes one exact review envelope and starts Claude and Codex
@@ -338,3 +359,21 @@ or authorize paid live model turns.
   catch-up, independent failure attribution, child-session reset resync,
   metadata-only restoration, credential redaction, UTF-8-safe bounds, and
   narrow Korean rendering. No provider model turn or credential is used.
+
+### 2026-07-27 — Standalone automatic updates
+
+- Added background daily release checks only for regular standalone executables
+  bearing the exact non-secret `install.sh` ownership marker. Source runs,
+  unmanaged files, symlinks, and unsupported targets perform no network call.
+- Added bounded GitHub release metadata, checksum, and binary downloads with
+  stable SemVer, trusted asset URL, SHA-256, and downloaded `--version`
+  verification before an adjacent atomic rename. The active process is never
+  restarted and all failures preserve the prior executable.
+- Added `splitlane update`, user-only `updates.mode` (`auto`, `notify`, `off`),
+  `SPLITLANE_DISABLE_AUTOUPDATE=1`, visible restart/failure notices, a persisted
+  non-secret daily check timestamp, and shutdown cancellation.
+- Offline tests cover successful replacement, notification-only behavior,
+  checksum and version mismatch preservation, unmanaged/symlink refusal, daily
+  cadence, forced manual checks, cancellation, config boundaries, UI reporting,
+  and installer marker creation. The complete suite passes 104 tests without a
+  provider model turn or release-network request.

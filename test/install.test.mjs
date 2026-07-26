@@ -50,6 +50,7 @@ test("installer verifies and installs the matching release asset", { skip: !targ
     const installed = join(installDir, "splitlane");
     assert.match(result.stdout, /Installed Splitlane/);
     assert.equal(await readFile(installed, "utf8"), contents);
+    assert.equal(await readFile(join(installDir, ".splitlane-managed"), "utf8"), "splitlane-managed/v1\nSungJun1217/splitlane\n");
     await chmod(installed, 0o755);
     const executed = await execFileAsync(installed);
     assert.equal(executed.stdout, "splitlane fixture\n");

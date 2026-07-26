@@ -3,6 +3,7 @@ export type PromptTarget = "both" | ProviderId;
 export type WorkflowMode = "compare" | "build" | "review" | "isolated";
 export type ModelSource = "request" | "project" | "user" | "provider_default";
 export type CapabilityStability = "stable" | "preview" | "experimental";
+export type UpdateMode = "auto" | "notify" | "off";
 export type WorkspaceAccess = "read_only" | "workspace_write";
 export type ApprovalDecision = "allow_once" | "deny" | "cancel_turn";
 export type ProviderErrorKind =
@@ -189,6 +190,7 @@ export interface ConfigurationSnapshot {
   allowPreview: boolean;
   showTools: "collapsed" | "expanded";
   restoreSessions: "ask" | "always" | "never";
+  updateMode: UpdateMode;
 }
 
 export interface RestorableSession {

@@ -22,6 +22,23 @@ The installer verifies the release SHA-256 checksum and writes to
 `SPLITLANE_INSTALL_DIR=/your/bin`. Splitlane does not install or configure the
 provider CLIs.
 
+Standalone installs created by this script check the public GitHub latest
+release in the background at most once per 24 hours. A newer stable release is
+size-bounded, SHA-256 verified, checked with `--version`, and atomically replaces
+only the managed Splitlane executable. The active process keeps running and the
+new version is used on the next launch. Run an immediate check with:
+
+```sh
+splitlane update
+```
+
+Set user configuration `updates.mode` to `notify` to report updates without
+installing them, or `off` to disable background checks. The environment variable
+`SPLITLANE_DISABLE_AUTOUPDATE=1` is an immediate background-check kill switch.
+Project configuration cannot control executable updates. Source runs, symlinks,
+unsupported platforms, and installations without the installer's managed marker
+are never modified automatically.
+
 Then start it for a project:
 
 ```sh
@@ -77,14 +94,21 @@ Configuration uses strict versioned JSON. Project settings at
 override both. The user file is `~/Library/Application Support/Splitlane/config.json`
 on macOS and `${XDG_CONFIG_HOME:-~/.config}/splitlane/config.json` on Linux.
 
+Example user configuration (project configuration uses the same schema except
+that it must omit `updates`):
+
 ```json
 {
   "version": 1,
   "providers": { "claude": { "model": "default" }, "codex": { "model": "default" } },
   "queue": { "limit": 10 },
-  "ui": { "inspector": true, "show_tools": "collapsed", "restore_sessions": "ask" }
+  "ui": { "inspector": true, "show_tools": "collapsed", "restore_sessions": "ask" },
+  "updates": { "mode": "auto" }
 }
 ```
+
+`updates` is accepted only in the user file. Valid modes are `auto` (default),
+`notify`, and `off`.
 
 Unknown keys and invalid values stop startup with an exact configuration path.
 Configuration cannot contain credentials, session IDs, writer leases, or

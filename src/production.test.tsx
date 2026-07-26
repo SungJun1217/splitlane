@@ -552,6 +552,20 @@ describe("production orchestrator", () => {
     expect(orchestrator.getSnapshot().handoffPhase).toBe("scout");
     await orchestrator.close();
   });
+
+  test("surfaces update availability, installation, and failure without touching lanes", async () => {
+    const { orchestrator } = setup("complete", "complete");
+    await orchestrator.initialize();
+    const lanes = orchestrator.getSnapshot().lanes;
+    orchestrator.reportUpdate({ outcome: "available", currentVersion: "0.0.4", latestVersion: "0.0.5", checked: true, message: "Splitlane 0.0.5 is available; run splitlane update." });
+    expect(orchestrator.getSnapshot().notice).toContain("splitlane update");
+    orchestrator.reportUpdate({ outcome: "updated", currentVersion: "0.0.4", latestVersion: "0.0.5", checked: true, message: "Splitlane 0.0.5 installed; restart Splitlane to use it." });
+    expect(orchestrator.getSnapshot().notice).toContain("restart Splitlane");
+    orchestrator.reportUpdate({ outcome: "failed", currentVersion: "0.0.4", latestVersion: null, checked: true, message: "Update failed; current version preserved." });
+    expect(orchestrator.getSnapshot().diagnostics.at(-1)).toContain("update:");
+    expect(orchestrator.getSnapshot().lanes).toEqual(lanes);
+    await orchestrator.close();
+  });
 });
 
 describe("shared meta conversation", () => {
@@ -752,7 +766,7 @@ describe("configuration", () => {
       await mkdir(nested, { recursive: true });
       await mkdir(join(home, ".config", "splitlane"), { recursive: true });
       await mkdir(join(project, ".splitlane"), { recursive: true });
-      await writeFile(paths.user, JSON.stringify({ version: 1, providers: { claude: { model: "user-claude" }, codex: { model: "user-codex" } }, queue: { limit: 4 }, ui: { restore_sessions: "never" } }));
+      await writeFile(paths.user, JSON.stringify({ version: 1, providers: { claude: { model: "user-claude" }, codex: { model: "user-codex" } }, queue: { limit: 4 }, ui: { restore_sessions: "never" }, updates: { mode: "notify" } }));
       await writeFile(paths.project, JSON.stringify({ version: 1, providers: { codex: { model: "project-codex" } }, capabilities: { allow_preview: false } }));
       expect(await discoverProjectRoot(nested)).toBe(project);
       const config = await loadConfig(project, { platform: "linux", home, env: {} });
@@ -761,6 +775,7 @@ describe("configuration", () => {
       expect(config.queue.limit).toBe(4);
       expect(config.ui.restoreSessions).toBe("never");
       expect(config.capabilities.allowPreview).toBe(false);
+      expect(config.updates.mode).toBe("notify");
       expect(config.loaded).toEqual({ user: true, project: true });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -772,7 +787,24 @@ describe("configuration", () => {
     expect(() => parseConfig({ version: 1, queue: { limit: 11 } }, "project.json")).toThrow("project.json.queue.limit");
     expect(() => parseConfig({ version: 1, providers: { claude: { model: "bad\nmodel" } } }, "project.json")).toThrow("unsafe control character");
     expect(() => parseConfig({ version: 2 }, "project.json")).toThrow("project.json.version must be 1");
+    expect(() => parseConfig({ version: 1, updates: { mode: "sometimes" } }, "user.json")).toThrow("user.json.updates.mode");
     expect(configPaths("/repo", { platform: "darwin", home: "/Users/test", env: {} }).user).toBe("/Users/test/Library/Application Support/Splitlane/config.json");
+  });
+
+  test("keeps executable updates user-controlled and allows an environment kill switch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-update-config-"));
+    const home = join(root, "home");
+    const paths = configPaths(root, { platform: "linux", home, env: {} });
+    try {
+      await mkdir(join(root, ".splitlane"), { recursive: true });
+      await writeFile(paths.project, JSON.stringify({ version: 1, updates: { mode: "auto" } }));
+      await expect(loadConfig(root, { platform: "linux", home, env: {} })).rejects.toThrow("updates is user-only");
+      await writeFile(paths.project, JSON.stringify({ version: 1 }));
+      expect((await loadConfig(root, { platform: "linux", home, env: { SPLITLANE_DISABLE_AUTOUPDATE: "1" } })).updates.mode).toBe("off");
+      expect((await loadConfig(root, { platform: "linux", home, env: {} })).updates.mode).toBe("auto");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

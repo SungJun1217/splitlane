@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { access, readFile } from "node:fs/promises";
-import type { ModelSource, ProviderId, RoleId, RoleProfile } from "../domain.ts";
+import type { ModelSource, ProviderId, RoleId, RoleProfile, UpdateMode } from "../domain.ts";
 
 export type RestoreSessions = "ask" | "always" | "never";
 export type ShowTools = "collapsed" | "expanded";
@@ -13,6 +13,7 @@ export interface EffectiveConfig {
   queue: { limit: number };
   roles: RoleProfile;
   capabilities: { allowPreview: boolean };
+  updates: { mode: UpdateMode };
   paths: { user: string; project: string };
   loaded: { user: boolean; project: boolean };
   stateDirectory: string;
@@ -25,6 +26,7 @@ interface ConfigFile {
   queue?: { limit?: number };
   roles?: Partial<RoleProfile>;
   capabilities?: { allow_preview?: boolean };
+  updates?: { mode?: UpdateMode };
 }
 
 const PROVIDERS = ["claude", "codex"] as const;
@@ -56,7 +58,7 @@ function optionalBoolean(value: unknown, path: string): boolean | undefined {
 
 export function parseConfig(value: unknown, path = "config"): ConfigFile {
   const root = record(value, path);
-  rejectUnknown(root, ["version", "providers", "ui", "queue", "roles", "capabilities"], path);
+  rejectUnknown(root, ["version", "providers", "ui", "queue", "roles", "capabilities", "updates"], path);
   if (root.version !== 1) throw new Error(`${path}.version must be 1.`);
   const result: ConfigFile = { version: 1 };
 
@@ -119,6 +121,14 @@ export function parseConfig(value: unknown, path = "config"): ConfigFile {
     const allowPreview = optionalBoolean(capabilities.allow_preview, `${path}.capabilities.allow_preview`);
     result.capabilities = allowPreview === undefined ? {} : { allow_preview: allowPreview };
   }
+  if (root.updates !== undefined) {
+    const updates = record(root.updates, `${path}.updates`);
+    rejectUnknown(updates, ["mode"], `${path}.updates`);
+    if (updates.mode !== undefined && !["auto", "notify", "off"].includes(String(updates.mode))) {
+      throw new Error(`${path}.updates.mode must be auto, notify, or off.`);
+    }
+    result.updates = updates.mode === undefined ? {} : { mode: updates.mode as UpdateMode };
+  }
   return result;
 }
 
@@ -166,7 +176,9 @@ export async function discoverProjectRoot(start: string): Promise<string> {
 
 export async function loadConfig(projectRoot: string, options: { platform?: NodeJS.Platform; home?: string; env?: NodeJS.ProcessEnv } = {}): Promise<EffectiveConfig> {
   const paths = configPaths(projectRoot, options);
+  const env = options.env ?? process.env;
   const [user, project] = await Promise.all([readConfig(paths.user), readConfig(paths.project)]);
+  if (project?.updates !== undefined) throw new Error(`${paths.project}.updates is user-only and cannot be controlled by a project.`);
   const model = (provider: ProviderId): { model: string; source: ModelSource } => project?.providers?.[provider]
     ? { model: project.providers[provider]!.model, source: "project" }
     : user?.providers?.[provider]
@@ -183,6 +195,7 @@ export async function loadConfig(projectRoot: string, options: { platform?: Node
     queue: { limit: project?.queue?.limit ?? user?.queue?.limit ?? 10 },
     roles: { ...DEFAULT_ROLES, ...user?.roles, ...project?.roles },
     capabilities: { allowPreview: project?.capabilities?.allow_preview ?? user?.capabilities?.allow_preview ?? true },
+    updates: { mode: env.SPLITLANE_DISABLE_AUTOUPDATE === "1" ? "off" : user?.updates?.mode ?? "auto" },
     paths,
     loaded: { user: user !== null, project: project !== null },
     stateDirectory: stateDirectory(options),

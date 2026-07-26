@@ -78,6 +78,9 @@ fi
 
 mkdir -p "$install_dir"
 install -m 0755 "${temporary_dir}/${asset}" "${install_dir}/splitlane"
+marker="${install_dir}/.splitlane-managed"
+printf '%s\n' 'splitlane-managed/v1' "$repository" > "${temporary_dir}/.splitlane-managed"
+install -m 0600 "${temporary_dir}/.splitlane-managed" "$marker"
 
 printf 'Installed Splitlane to %s/splitlane\n' "$install_dir"
 case ":${PATH:-}:" in

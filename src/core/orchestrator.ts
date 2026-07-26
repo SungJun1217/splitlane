@@ -37,6 +37,7 @@ import { classifyProviderError } from "./provider-error.ts";
 import { SessionStore, type SessionRecord } from "../session/store.ts";
 import { WorktreeManager } from "../worktree/manager.ts";
 import { SharedMetaSession, type MetaDispatch } from "../meta/session.ts";
+import type { UpdateResult } from "../update/updater.ts";
 
 // Visible M1 routing hypotheses only; this is not the approved v0.1 default profile.
 const M1_PREVIEW_ROLES: RoleProfile = {
@@ -129,6 +130,7 @@ export class CompareOrchestrator {
         allowPreview: this.#allowPreview,
         showTools: config?.ui.showTools ?? "collapsed",
         restoreSessions: config?.ui.restoreSessions ?? "ask",
+        updateMode: config?.updates.mode ?? "auto",
       },
       restorableSessions: [],
       diagnostics: [],
@@ -142,6 +144,16 @@ export class CompareOrchestrator {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   };
+
+  reportUpdate(result: UpdateResult): void {
+    if (!["available", "updated", "failed"].includes(result.outcome)) return;
+    this.#patch({
+      notice: sanitizeTerminalText(result.message),
+      diagnostics: result.outcome === "failed"
+        ? [...this.#snapshot.diagnostics, `update: ${sanitizeTerminalText(result.message)}`].slice(-100)
+        : this.#snapshot.diagnostics,
+    });
+  }
 
   #publish(next: AppSnapshot): void {
     this.#snapshot = next;

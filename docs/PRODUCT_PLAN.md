@@ -1004,13 +1004,19 @@ Exit gate: reviewer cannot modify the workspace and the user can trace every han
 
 - Clean single-command install for macOS and Linux.
 - Version diagnostics.
+- Standalone-only background update checks with user-level control, verified
+  atomic replacement, and an explicit manual update command.
 - Shell completions.
 - Reproducible release artifacts.
 - No automatic provider installation or config mutation.
 
 The macOS arm64/Linux x86_64 GitHub Release and checksum-verifying installer
-slice was pulled forward after M1. Remaining platforms and release-hardening
-items stay in M6.
+slice was pulled forward after M1. On 2026-07-27 the user also approved
+standalone auto-update: `auto` by default, startup checks at most daily,
+background download, SHA-256 and downloaded-version verification, atomic
+replacement, next-launch activation, user-only `auto`/`notify`/`off`, and no
+project-controlled updates. Remaining platforms and release-hardening items
+stay in M6.
 
 ## 18. Test strategy
 

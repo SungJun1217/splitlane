@@ -310,7 +310,7 @@ function OverlayPanel({ overlay, snapshot, modelProvider, modelDraft, roleIndex,
         <Text bold>CONFIGURATION · STRICT JSON · PROJECT OVERRIDES USER</Text>
         <Text>{config.loadedProject ? "LOADED" : "missing"} project: {config.projectPath}</Text>
         <Text>{config.loadedUser ? "LOADED" : "missing"} user: {config.userPath}</Text>
-        <Text>queue limit: {snapshot.queueLimit} · tools: {config.showTools} · restore: {config.restoreSessions}</Text>
+        <Text>queue limit: {snapshot.queueLimit} · tools: {config.showTools} · restore: {config.restoreSessions} · updates: {config.updateMode}</Text>
         <Text>preview capabilities: {config.allowPreview ? "enabled" : "disabled"}</Text>
         <Text>Claude model: {snapshot.lanes.claude.requestedModel} ({snapshot.lanes.claude.modelSource})</Text>
         <Text>Codex model: {snapshot.lanes.codex.requestedModel} ({snapshot.lanes.codex.modelSource})</Text>
@@ -451,7 +451,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, overlay = null,
   );
 }
 
-export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
+export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrchestrator; onBeforeExit?: () => Promise<void> }) {
   const snapshot = useSyncExternalStore(orchestrator.subscribe, orchestrator.getSnapshot, orchestrator.getSnapshot);
   const { columns, rows } = useWindowSize();
   const { exit } = useApp();
@@ -523,7 +523,7 @@ export function App({ orchestrator }: { orchestrator: CompareOrchestrator }) {
 
   useInput((input, key) => {
     if (key.ctrl && input === "q") {
-      void orchestrator.close().finally(exit);
+      void Promise.allSettled([orchestrator.close(), onBeforeExit?.()]).finally(exit);
       return;
     }
     if (key.escape) {

@@ -2,7 +2,7 @@
 
 Status: approved implementation increment
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## Decision
 
@@ -37,9 +37,34 @@ public GitHub Release, verifies SHA-256 before installation, and writes
 `splitlane` to `${HOME}/.local/bin` by default. It does not install providers,
 alter provider configuration, request `sudo`, or start a model turn.
 
-Linux ARM64/musl, macOS x64, Windows, notarization, Homebrew, shell completions,
-and update automation remain future distribution work and require platform
-validation.
+Linux ARM64/musl, macOS x64, Windows, notarization, Homebrew, and shell
+completions remain future distribution work and require platform validation.
+
+## Approved standalone update contract
+
+The user approved Claude Code-style automatic updates on 2026-07-27. The
+standalone `splitlane` executable installed from GitHub Releases uses this
+contract:
+
+- `auto` is the user-level default. TUI startup checks the public Splitlane
+  GitHub latest release at most once per 24 hours and performs no telemetry.
+- Checks run in the background. A successful update replaces only the current
+  standalone executable and takes effect on the next launch; it never restarts
+  the active TUI or provider processes.
+- The updater accepts stable SemVer tags only, selects the exact supported
+  platform asset, bounds every download, verifies the published SHA-256, checks
+  the downloaded executable version, then uses an adjacent temporary file and
+  atomic rename. Any failure preserves the current executable.
+- Symlinks, source/Bun runs, unsupported platforms, package-managed paths,
+  unwritable install directories, and non-regular executable paths are never
+  auto-modified. The installer writes a non-secret adjacent ownership marker;
+  the updater refuses any executable without that exact marker. Skipped paths
+  receive an actionable notification or remain silent during background checks.
+- `splitlane update` bypasses the periodic interval for an explicit immediate
+  check. User config supports `updates.mode` values `auto`, `notify`, and `off`.
+  Project config cannot enable or control executable updates.
+- `SPLITLANE_DISABLE_AUTOUPDATE=1` disables background checks while retaining
+  the explicit `splitlane update` command.
 
 ## Verification checkpoint
 

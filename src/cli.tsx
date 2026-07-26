@@ -5,8 +5,9 @@ import { CompareOrchestrator } from "./core/orchestrator.ts";
 import { ClaudeAdapter } from "./providers/claude.ts";
 import { CodexAdapter } from "./providers/codex.ts";
 import { App } from "./ui/app.tsx";
-import { discoverProjectRoot, loadConfig } from "./config/config.ts";
+import { discoverProjectRoot, loadConfig, stateDirectory } from "./config/config.ts";
 import { formatDoctor, runDoctor } from "./compat/doctor.ts";
+import { StandaloneUpdater } from "./update/updater.ts";
 import packageJson from "../package.json";
 
 const HELP = `Splitlane ${packageJson.version}
@@ -14,10 +15,12 @@ const HELP = `Splitlane ${packageJson.version}
 Usage:
   splitlane [project]
   splitlane doctor [project] [--json]
+  splitlane update
 
 Commands:
   doctor    Probe local CLI, auth, schema, sandbox, and transport compatibility
             without starting a provider thread or model turn.
+  update    Check and install the latest verified standalone release now.
 
 Options:
   --json     Print doctor/v1 JSON (doctor only)
@@ -50,6 +53,26 @@ export async function run(argv: readonly string[] = process.argv.slice(2)): Prom
     if (report.status === "fail") process.exitCode = 1;
     return;
   }
+  if (argv[0] === "update") {
+    if (argv.length > 1) {
+      console.error("Update does not accept additional arguments.");
+      process.exitCode = 2;
+      return;
+    }
+    const updater = new StandaloneUpdater({
+      currentVersion: packageJson.version,
+      executablePath: process.execPath,
+      stateDirectory: stateDirectory(),
+      mode: "auto",
+    });
+    const result = await updater.start(true);
+    const output = `${result.message}\n`;
+    if (result.outcome === "failed" || result.outcome === "unsupported") {
+      process.stderr.write(output);
+      process.exitCode = 1;
+    } else process.stdout.write(output);
+    return;
+  }
   const requestedRoot = resolve(argv[0] ?? process.cwd());
   const projectRoot = await discoverProjectRoot(requestedRoot);
   let config;
@@ -65,5 +88,12 @@ export async function run(argv: readonly string[] = process.argv.slice(2)): Prom
     codex: new CodexAdapter(),
   }, config);
   await orchestrator.initialize();
-  render(<App orchestrator={orchestrator} />, { alternateScreen: true, exitOnCtrlC: false });
+  const updater = new StandaloneUpdater({
+    currentVersion: packageJson.version,
+    executablePath: process.execPath,
+    stateDirectory: config.stateDirectory,
+    mode: config.updates.mode,
+  });
+  render(<App orchestrator={orchestrator} onBeforeExit={() => updater.close()} />, { alternateScreen: true, exitOnCtrlC: false });
+  void updater.start().then((result) => orchestrator.reportUpdate(result));
 }
