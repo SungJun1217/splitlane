@@ -140,9 +140,18 @@ Startup checks:
 - The default view shows both lanes; the default send route is `CODEX`, which
   matches the initial focused builder lane. Sending to both is the explicit
   `BROADCAST` route.
-- The default composer uses the human-gated Codex-build → Claude-challenge
-  workflow. Direct provider prompts and Broadcast remain available through an
-  explicit composer-mode switch.
+- The default composer sends a direct read-only prompt on the default `CODEX`
+  route. The human-gated Codex-build → Claude-challenge workflow remains one
+  explicit composer-mode switch away.
+
+  Revised 2026-07-28. The composer previously defaulted to the build workflow,
+  which meant a first `Enter` — on any text, including a greeting or a question —
+  opened a writer-grant gate. That contradicted the surrounding defaults: the
+  workspace starts in `compare` with writer `NONE` precisely because read-only is
+  the safe default, and the composer was the one control that started on the
+  write-authority path. Starting the composer read-only makes the whole initial
+  state consistent, and costs one keystroke (`Option/Alt+D`) to reach the build
+  workflow, which the composer footer advertises.
 - Claude and Codex remain native child sessions of one visible Splitlane meta
   session. The same immutable current-user envelope is sent to both within a
   bounded dispatch window.

@@ -95,14 +95,15 @@ splitlane doctor /path/to/project --json
 splitlane /path/to/project
 ```
 
-The initial mode is `COMPARE`, the writer is `NONE`, and the view shows both
-lanes. The composer starts in `TASK FLOW`, where `Enter` starts an implementation
-task rather than sending a message: it reviews a Codex-only writer grant, `G`
-then grants the lease and starts the turn, and a completed build opens a separate
-Claude challenge confirmation. To send a prompt without granting write access —
-a question, a comparison, anything conversational — press `Option/Alt+D` for
-direct mode; `Ctrl+R` then selects Codex, Claude, or the explicit `BROADCAST`
-route.
+The initial mode is `COMPARE`, the writer is `NONE`, the view shows both lanes,
+and the composer sends a direct read-only prompt on the default `CODEX` route.
+`Ctrl+R` selects Codex, Claude, or the explicit `BROADCAST` route. Nothing you
+type can grant write access until you ask for it.
+
+To implement a change, `Option/Alt+D` switches the composer to `TASK FLOW`, where
+`Enter` opens a review of a Codex-only writer grant, `G` grants the lease and
+starts the turn, and a completed build opens a separate Claude challenge
+confirmation.
 
 On normal and ultra-wide terminals, Claude remains above Codex in the left
 workspace and the read-only code/evidence inspector stays on the right. Lane

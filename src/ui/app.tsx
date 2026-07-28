@@ -494,7 +494,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
   const pausedWriter = snapshot.mode === "review" && snapshot.review ? ` · paused ${snapshot.review.writer === "claude" ? "C" : "X"}` : "";
   const footer = composerMode === "flow"
     ? "Enter build task · ⌥D direct prompt · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit"
-    : "Enter send · ^R route · ⌥D flow · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit";
+    : "Enter send · ^R route · ⌥D build task · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit";
   const laneInnerWidth = Math.max(10, (layout === "focused" ? columns : widths.lanes) - 4);
   const requiredRows = minimumRows(Math.max(columns, MIN_COLUMNS), viewMode, Boolean(snapshot.notice));
   if (!fitsTerminal(columns, rows, viewMode, Boolean(snapshot.notice))) {
@@ -562,7 +562,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   const { exit } = useApp();
   const [prompt, setPrompt] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("both");
-  const [composerMode, setComposerMode] = useState<ComposerMode>("flow");
+  // Read-only is the safe default everywhere else in the initial state (compare
+  // mode, writer NONE), so the composer starts read-only too. See
+  // docs/PRODUCT_PLAN.md.
+  const [composerMode, setComposerMode] = useState<ComposerMode>("direct");
   const [guidedBuildActive, setGuidedBuildActive] = useState(false);
   const [overlay, setOverlay] = useState<Overlay>(() => snapshot.restorableSessions.length ? "restore" : null);
   const [modelProvider, setModelProvider] = useState<ProviderId>(snapshot.focusedProvider);
@@ -988,14 +991,17 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
               : Math.max(0, current[provider] - page),
       }));
     } else if (key.meta && input.toLowerCase() === "d") {
-      setComposerMode((current) => {
-        const next = current === "flow" ? "direct" : "flow";
-        if (next === "flow") {
-          orchestrator.focus("codex");
-          orchestrator.setTarget("codex");
-        }
-        return next;
-      });
+      const next = composerMode === "flow" ? "direct" : "flow";
+      setComposerMode(next);
+      if (next === "flow") {
+        // Task flow always builds with Codex. Say that the route and focus moved
+        // rather than changing them silently, since every other route change is
+        // something the user asked for explicitly.
+        const moved = snapshot.target !== "codex" || snapshot.focusedProvider !== "codex";
+        orchestrator.focus("codex");
+        orchestrator.setTarget("codex");
+        if (moved) orchestrator.showNotice("Task flow builds with Codex, so the send route and lane focus moved to Codex.");
+      }
     }
     else if (key.meta && input === "0") setViewMode((current) => current === "both" ? "focused" : "both");
     else if (key.meta && input === "1") {

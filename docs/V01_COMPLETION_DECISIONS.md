@@ -98,6 +98,17 @@ before. This adds no automatic debate or unbounded loop.
 - Approval modals show provider, safety effect, exact bounded command/tool,
   cwd, affected paths, network effect, and only supported decisions. Read-only
   approval requests remain deny-only and never enter an allow-capable inbox.
+- The composer starts read-only, matching the `compare`/writer-`NONE` workspace
+  default. Defaulting it to the build workflow made the first `Enter` on any text
+  open a writer-grant gate, leaving the composer as the one control that started
+  on the write-authority path. See `docs/PRODUCT_PLAN.md` for the revision.
+- Reaching a confirmation and acting on it never share a key. `Enter` reaches the
+  writer-grant confirmation in both the task-flow gate and the `Ctrl+B` overlay;
+  `G` grants. Three identical presses used to carry a typed line from the composer
+  to a granted lease and a paid turn.
+- A gate that can open on a keystroke the user did not aim says why it opened and
+  names the way out, because the mode that caused it is not visible from the
+  modal itself.
 - An arriving approval never takes input away from a modal that already owns it.
   The inbox opens as soon as input is free; until then the pending count stays
   visible under the open modal. Stealing focus both discarded the user's draft

@@ -1487,6 +1487,26 @@ describe("layout safety and modal visibility", () => {
     expect(output).not.toContain("G grant Codex the writer lease");
   });
 
+  test("nothing typed on a fresh start can reach write access without a mode switch", () => {
+    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
+    // The composer default has to agree with the workspace default: the initial
+    // state is compare mode with writer NONE because read-only is safe, so the
+    // first Enter must send a prompt, not open a writer-grant gate.
+    expect(source).toContain('useState<ComposerMode>("direct")');
+    const { orchestrator } = setup();
+    const snapshot = orchestrator.getSnapshot();
+    expect(snapshot.mode).toBe("compare");
+    expect(snapshot.writer).toBeNull();
+    const screen = renderToString(
+      <SplitlaneView snapshot={snapshot} prompt="안녕~" columns={120} rows={30} composerMode="direct" />,
+      { columns: 120 },
+    );
+    expect(screen).toContain("send CODEX");
+    expect(screen).toContain("Enter send");
+    // The build workflow stays discoverable from the read-only default.
+    expect(screen).toContain("⌥D build task");
+  });
+
   test("the task-flow gate says why it opened and does not grant on a repeated Enter", () => {
     const { orchestrator } = setup();
     const base = orchestrator.getSnapshot();
