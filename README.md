@@ -307,6 +307,23 @@ bun install
 bun run dev /path/to/project
 ```
 
+## Read-only desktop mirror (preview)
+
+A session can publish its state to a desktop window. The window is a view: it
+cannot send a prompt, grant a writer lease, answer an approval, or remove a
+worktree — the transport has no channel for it, and the publisher drops any reader
+that tries to send a byte.
+
+```sh
+splitlane /path/to/project --mirror   # terminal owns the session, publishes snapshots
+bun run gui:dev                       # Electron window attaches read-only
+```
+
+Without `--mirror` there is no endpoint and no extra surface. The endpoint is a
+Unix socket (named pipe on Windows) inside the user state directory with
+owner-only permissions; it is never a network listener. Design and staged plan:
+[GUI transition decisions](docs/GUI_TRANSITION_DECISIONS.md).
+
 ## Verify without credentials or model cost
 
 ```sh
@@ -314,6 +331,7 @@ bun run typecheck
 bun test
 bun run build
 bun run build:compile
+bun run gui:build
 ```
 
 The offline suite uses captured redacted fixtures and fake provider executables;
@@ -327,6 +345,7 @@ it requires no provider credentials, internet access, or paid model turns.
 - [M2 single-writer decisions](docs/M2_SINGLE_WRITER_DECISIONS.md)
 - [M3 review handoff decisions](docs/M3_REVIEW_HANDOFF_DECISIONS.md)
 - [v0.1 completion decisions](docs/V01_COMPLETION_DECISIONS.md)
+- [GUI transition decisions](docs/GUI_TRANSITION_DECISIONS.md)
 
 ## Current platform scope
 

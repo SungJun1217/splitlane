@@ -19,6 +19,8 @@ bun run typecheck                 # tsc --noEmit
 bun test                          # both suites (offline, no credentials)
 bun run build                     # bundle to dist/
 bun run build:compile             # standalone executable to dist/splitlane
+bun run gui:build                 # bundle the Electron mirror to dist/gui
+bun run gui:dev                   # bundle, then open the read-only mirror window
 ```
 
 Two separate test suites:
@@ -27,8 +29,9 @@ Two separate test suites:
   Single test: `bun test src -t "substring of the test name"`.
 - `bun run test:spike` → `node --test test/*.test.mjs` — tests the `spike/` prototype and the JSON schemas.
   Single file: `node --test test/sanitize.test.mjs`.
+- `bun run test:gui` → `bun test gui` — the Electron mirror's view, rendered with `react-dom/server`. No Electron process and no DOM are involved.
 
-CLI surface: `splitlane [project]`, `splitlane doctor [project] [--json]`, `splitlane update`.
+CLI surface: `splitlane [project] [--mirror]`, `splitlane doctor [project] [--json]`, `splitlane update`.
 
 `spike/probe*.mjs` and `spike/live-*.mjs` start **real, paid provider turns** and are gated behind explicit `--i-understand-this-starts-model-turns` flags. Never run them, and never add tests that invoke real model turns — the offline suite uses redacted fixtures in `test/fixtures/` and fake provider executables (`test/fixtures/fake-*.mjs`).
 
@@ -43,6 +46,7 @@ Strict one-way dependency: **Ink TUI → orchestrator → provider adapters**, w
 - `src/core/orchestrator.ts` (`CompareOrchestrator`) — the center of gravity (~1.8k lines). Owns the single immutable `AppSnapshot`, publishes it to subscribers, and holds routing, queueing, cancellation, writer promotion/revocation, review lifecycle, worktree lifecycle, approvals, and session persistence. UI mutations go through its methods; the UI never mutates state directly.
 - `src/providers/claude.ts` — wraps the official `@anthropic-ai/claude-agent-sdk` `query()`. `src/providers/codex.ts` + `codex-rpc.ts` — the Codex app-server JSONL RPC protocol. Both normalize into `NormalizedEvent` and enforce that `workspace_write` requires an authentic writer lease.
 - `src/ui/app.tsx` — `App` subscribes to the orchestrator; `SplitlaneView` is a pure snapshot→JSX renderer (this is why rendering can be tested with `renderToString` and no live terminal). `src/ui/layout.ts` and `src/ui/text.ts` handle responsive panel sizing, scroll windows, and grapheme/CJK-safe truncation.
+- `src/mirror/*` — `MirrorPublisher` publishes the `AppSnapshot` of a live session over a local socket, one direction only, behind `--mirror`. `gui/` is the Electron read-only renderer that attaches to it: `main.ts` (socket client, bundled to CJS), `preload.ts` (observe-only bridge), `mirror-view.tsx` (pure view), `renderer.tsx` (mount). The GUI holds no session and has no command channel — see `docs/GUI_TRANSITION_DECISIONS.md` for the staged plan and the gate before it may gain one.
 - Supporting modules, each a boundary named in `AGENTS.md`: `git/observer.ts` (read-only, pager/external-diff disabled), `workspace/guard.ts` (writer leases, path containment), `worktree/manager.ts`, `session/store.ts` (metadata only, in the platform state dir), `meta/session.ts` (`SharedMetaSession` — bounded, redacted peer-context relay), `config/config.ts`, `compat/doctor.ts`, `review/*`, `terminal/sanitize.ts`, `process/child.ts` (process-group termination).
 
 `spike/` is the disposable M0 protocol prototype (`.mjs`). It is not production code and is not imported by `src/`; treat it as reference for provider stream shapes only.

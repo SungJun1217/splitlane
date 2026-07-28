@@ -8,12 +8,13 @@ import { App } from "./ui/app.tsx";
 import { discoverProjectRoot, loadConfig, stateDirectory } from "./config/config.ts";
 import { formatDoctor, runDoctor } from "./compat/doctor.ts";
 import { StandaloneUpdater } from "./update/updater.ts";
+import { MirrorPublisher } from "./mirror/publisher.ts";
 import packageJson from "../package.json";
 
 const HELP = `Splitlane ${packageJson.version}
 
 Usage:
-  splitlane [project]
+  splitlane [project] [--mirror]
   splitlane doctor [project] [--json]
   splitlane update
 
@@ -23,6 +24,8 @@ Commands:
   update    Check and install the latest verified standalone release now.
 
 Options:
+  --mirror   Publish a read-only snapshot mirror for the desktop app on a local
+             socket. The mirror can never send commands.
   --json     Print doctor/v1 JSON (doctor only)
   --help     Show this help
   --version  Show the Splitlane version
@@ -73,12 +76,14 @@ export async function run(argv: readonly string[] = process.argv.slice(2)): Prom
     } else process.stdout.write(output);
     return;
   }
-  if (argv.length > 1 || argv[0]?.startsWith("-")) {
-    console.error(argv[0]?.startsWith("-") ? `Unknown option: ${argv[0]}` : "Splitlane accepts at most one project path.");
+  const mirror = argv.includes("--mirror");
+  const positional = argv.filter((value) => value !== "--mirror");
+  if (positional.length > 1 || positional[0]?.startsWith("-")) {
+    console.error(positional[0]?.startsWith("-") ? `Unknown option: ${positional[0]}` : "Splitlane accepts at most one project path.");
     process.exitCode = 2;
     return;
   }
-  const requestedRoot = resolve(argv[0] ?? process.cwd());
+  const requestedRoot = resolve(positional[0] ?? process.cwd());
   const projectRoot = await discoverProjectRoot(requestedRoot);
   let config;
   try {
@@ -99,6 +104,24 @@ export async function run(argv: readonly string[] = process.argv.slice(2)): Prom
     stateDirectory: config.stateDirectory,
     mode: config.updates.mode,
   });
-  render(<App orchestrator={orchestrator} onBeforeExit={() => updater.close()} />, { alternateScreen: true, exitOnCtrlC: false });
+  // The desktop mirror is opt-in per session: without --mirror there is no
+  // socket and no extra surface. It only ever publishes, so a failure to listen
+  // is reported into the TUI rather than taking the session down.
+  const publisher = mirror
+    ? await MirrorPublisher.start({
+      source: orchestrator,
+      projectRoot,
+      stateDirectory: config.stateDirectory,
+      version: packageJson.version,
+      onError: (message) => orchestrator.showNotice(message),
+    }).catch((error: unknown) => {
+      console.error(`Splitlane mirror could not start: ${(error as Error).message}`);
+      return null;
+    })
+    : null;
+  render(<App orchestrator={orchestrator} onBeforeExit={async () => {
+    await Promise.allSettled([updater.close(), publisher?.close()]);
+  }} />, { alternateScreen: true, exitOnCtrlC: false });
+  if (publisher) orchestrator.showNotice("Read-only desktop mirror is published for this session. Run `bun run gui:dev` to attach; it can only observe.");
   void updater.start().then((result) => orchestrator.reportUpdate(result));
 }

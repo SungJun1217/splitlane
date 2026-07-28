@@ -7,6 +7,7 @@ This file applies to the entire repository.
 - Working title: **Splitlane**
 - Planned CLI command: `splitlane`
 - One-line description: A local TUI that routes prompts to Claude Code and Codex in parallel while keeping their sessions, models, output, and write access separate.
+- Since 2026-07-29 the TUI has an optional desktop companion: a read-only Electron mirror of a running session. Both renderers are first-class; see `docs/GUI_TRANSITION_DECISIONS.md`. The terminal remains the only renderer that can grant authority until that document's stage 4 is approved.
 - Core metaphor: each coding agent runs in its own lane; the user controls routing and merge decisions from above.
 
 The final product name is pending. Do not use `Duet`, `AgentMux`, or `Coduo`; they are already used by adjacent products. Do not claim that any candidate name is trademark-cleared without a proper review.
@@ -75,7 +76,9 @@ These rules are more important than feature convenience:
 8. **No hidden writes.** The active write policy and current writer must always be visible before a prompt is sent.
 9. **No false feature parity.** Provider-native capabilities stay visibly provider-specific; do not imitate them with weaker behavior and present them as equivalent.
 10. **No silent experimental enablement.** Experimental Claude or Codex features require an explicit user action and a visible stability label.
-11. **No permanent winner assumptions.** Comparative strengths are configurable routing hypotheses, not universal facts. Every recommendation remains visible and overridable.
+11. **No authority outside the terminal.** A mirrored snapshot is a view. Until the shared interaction state machine exists, only the TUI may promote a writer, resolve an approval, start a turn, or remove a worktree.
+12. **No network surface for the mirror.** The mirror is a local socket in the user state directory with owner-only permissions. It is never a TCP listener and never reachable from another machine.
+13. **No permanent winner assumptions.** Comparative strengths are configurable routing hypotheses, not universal facts. Every recommendation remains visible and overridable.
 
 ## Workflow modes
 
@@ -123,6 +126,8 @@ Configuration precedence, highest first:
 Keep these responsibilities separate regardless of implementation language:
 
 1. **TUI:** rendering, focus, keyboard input, modals, scrolling, and accessibility.
+   - **Snapshot mirror:** publishing the immutable `AppSnapshot` of a running session over a local socket, one direction only, opt-in per session. It adds no normalization layer and accepts no commands.
+   - **Desktop renderer:** drawing a mirrored snapshot. It holds no session, constructs no orchestrator, and in the read-only stage has no channel for commands.
 2. **Orchestrator:** routing, queues, cancellation, status transitions, and provider isolation.
 3. **Provider adapters:** CLI discovery, argument construction, structured stream parsing, and session ID extraction.
 4. **Role router:** visible, overridable recommendations for scout, architect, builder, debugger, and review lenses.
@@ -253,7 +258,8 @@ Before considering a user-visible increment complete, verify:
 
 Do not present these as finalized until the user approves them:
 
-- Production implementation stack and packaging format.
+- Production implementation stack and packaging format, including whether the desktop mirror is packaged and signed at all.
+- Whether the desktop renderer ever gains command authority (stage 4 of the GUI transition), which requires the interaction state machine to be shared first.
 - Exact approval/permission interaction inside the TUI.
 - Persistent session restoration UX.
 - Worktree creation, retention, and merge workflow.
