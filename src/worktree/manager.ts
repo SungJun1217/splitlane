@@ -91,12 +91,18 @@ export class WorktreeManager {
     let current: IsolatedRunSnapshot = { ...plan, lifecycle: "creating" };
     await this.writeManifest(current);
     try {
+      const lanes = { ...plan.lanes };
       for (const provider of ["claude", "codex"] as const) {
         const workspace = plan.lanes[provider];
         const result = await git(this.projectRoot, ["worktree", "add", "-b", workspace.branch, workspace.path, plan.baseCommit]);
         if (result.exitCode !== 0) throw new Error(`${provider} worktree creation failed: ${result.stderr || result.stdout}`);
+        // The plan defaults `present` to false because nothing exists yet. Git
+        // just created the directory, so record that here: leaving it false made
+        // a healthy run render as NO DIRECTORY until the first refresh, and
+        // persisted the same lie into the manifest for the next startup.
+        lanes[provider] = { ...workspace, present: true };
       }
-      current = { ...current, lifecycle: "active" };
+      current = { ...current, lifecycle: "active", lanes };
       await this.writeManifest(current);
       return current;
     } catch (error) {
@@ -177,13 +183,20 @@ export class WorktreeManager {
    * isolated mode forever. */
   async discard(run: IsolatedRunSnapshot): Promise<{ remainingPaths: readonly string[]; remainingBranches: readonly string[] }> {
     this.#validate(run);
-    const inspected = await this.inspect(run).catch(() => run);
-    const remainingPaths = (["claude", "codex"] as const)
-      .filter((provider) => inspected.lanes[provider].present)
-      .map((provider) => inspected.lanes[provider].path);
+    // Presence is checked directly rather than through `inspect`, whose failure
+    // path used to fall back to a snapshot that merely defaults `present` to
+    // false. Both lanes then looked absent and the recursive removal below
+    // deleted the run directory holding them. Anything but a definite ENOENT
+    // counts as present, so an unreadable directory keeps its worktrees.
+    const remainingPaths: string[] = [];
+    for (const provider of ["claude", "codex"] as const) {
+      const path = run.lanes[provider].path;
+      const absent = await stat(path).then(() => false, (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
+      if (!absent) remainingPaths.push(path);
+    }
     const remainingBranches: string[] = [];
     for (const provider of ["claude", "codex"] as const) {
-      const branch = inspected.lanes[provider].branch;
+      const branch = run.lanes[provider].branch;
       const exists = await git(this.projectRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
       if (exists.exitCode === 0) remainingBranches.push(branch);
     }

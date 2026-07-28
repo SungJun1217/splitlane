@@ -13,6 +13,7 @@ import { classifyProviderError, providerErrorAction } from "./core/provider-erro
 import type {
   ApprovalDecision,
   AppSnapshot,
+  IsolatedRunSnapshot,
   NormalizedEvent,
   ProviderAdapter,
   ProviderId,
@@ -53,6 +54,11 @@ import { SessionStore, projectIdentity } from "./session/store.ts";
 import { formatDoctor, runDoctor } from "./compat/doctor.ts";
 import { SharedMetaSession } from "./meta/session.ts";
 import { WorktreeManager } from "./worktree/manager.ts";
+
+/** `renderToString` emits SGR codes whenever colour is enabled, and they land in
+ * the middle of phrases like `writer NONE`. Assertions about wording strip them
+ * so a test does not pass or fail on whether the terminal supports colour. */
+const plain = (screen: string) => screen.replace(/\[[0-9;]*m/g, "");
 
 type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed" | "wedged_start" | "slow_start";
 
@@ -567,7 +573,7 @@ describe("production orchestrator", () => {
   });
 
   test("an abandoned startup cannot resurrect its lane when the provider finally answers", async () => {
-    const { orchestrator } = setup("slow_start", "complete");
+    const { orchestrator, claude } = setup("slow_start", "complete");
     await orchestrator.initialize();
     orchestrator.setTarget("claude");
     void orchestrator.dispatch("startup answers too late");
@@ -577,6 +583,15 @@ describe("production orchestrator", () => {
     expect(orchestrator.getSnapshot().lanes.claude.status).toBe("CANCELLED");
     expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBeNull();
     expect(orchestrator.getSnapshot().lanes.claude.turnId).toBeNull();
+    // The handle that arrived too late is still recorded, so the next prompt
+    // reuses it. Dropping it left a second session running beside the first with
+    // nothing but shutdown able to reach either.
+    expect(claude.sessions).toHaveLength(1);
+    orchestrator.setTarget("claude");
+    expect(await orchestrator.dispatch("the next prompt reuses that session")).toBe(true);
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "RUNNING");
+    expect(claude.sessions).toHaveLength(1);
+    expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBe("claude-session");
     await orchestrator.close();
   });
 
@@ -980,8 +995,11 @@ describe("terminal rendering", () => {
     expect(sanitizeTerminalText("ok\u001b]2;owned\u0007\u001b[31m!\u001b[0m")).toBe("ok!");
     expect(appendBounded("1234", "56", 4)).toBe("3456");
     // A bare carriage return would let provider text overwrite the line
-    // already on screen and claim a decision that was never made.
-    expect(sanitizeTerminalText("denied\rapproved")).toBe("denied\napproved");
+    // already on screen and claim a decision that was never made. It becomes a
+    // separator rather than a newline so a redrawn progress meter cannot flood
+    // the bounded lane buffer with one line per frame.
+    expect(sanitizeTerminalText("denied\rapproved")).toBe("denied approved");
+    expect(sanitizeTerminalText("50%\r\r\r100%")).toBe("50% 100%");
     expect(sanitizeTerminalText("line\r\nnext")).toBe("line\nnext");
   });
 
@@ -1039,7 +1057,7 @@ describe("terminal rendering", () => {
         },
       },
     };
-    const output = renderToString(<SplitlaneView snapshot={snapshot} prompt="변경점을 비교해줘" columns={90} rows={30} scrollOffsets={{ claude: 1, codex: 0 }} />, { columns: 90 });
+    const output = plain(renderToString(<SplitlaneView snapshot={snapshot} prompt="변경점을 비교해줘" columns={90} rows={30} scrollOffsets={{ claude: 1, codex: 0 }} />, { columns: 90 }));
     expect(output).toContain("SPLITLANE");
     expect(output).toContain("SCROLLED");
     expect(output).toContain("COMPARE");
@@ -1055,19 +1073,19 @@ describe("terminal rendering", () => {
     expect(output).not.toContain("FOCUSEmode");
     expect(output).toContain("CODEX");
 
-    const directOutput = renderToString(
+    const directOutput = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="직접 질문" columns={90} rows={30} composerMode="direct" />,
       { columns: 90 },
-    );
+    ));
     expect(directOutput).toContain("send CODEX");
     expect(directOutput).toContain("CODEX 직접 질문");
     expect(directOutput).toContain("direct CODEX");
     expect(directOutput).not.toContain("flow CODEX → CLAUDE");
 
-    const ultraWideOutput = renderToString(
+    const ultraWideOutput = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="" columns={240} rows={60} />,
       { columns: 240 },
-    );
+    ));
     const ultraWideLines = ultraWideOutput.split("\n");
     const claudeHeaderIndex = ultraWideLines.findIndex((line) => line.includes("○ CLAUDE") && line.includes("CODE · CHANGES"));
     const codexHeaderIndex = ultraWideLines.findIndex((line) => line.includes("● CODEX"));
@@ -1077,53 +1095,53 @@ describe("terminal rendering", () => {
     expect(codexHeaderIndex).toBeGreaterThan(claudeHeaderIndex);
     expect(ultraWideLines[claudeHeaderIndex]).not.toContain("CODEX");
 
-    const diffOutput = renderToString(
+    const diffOutput = plain(renderToString(
       <SplitlaneView snapshot={{ ...snapshot, git: { ...snapshot.git, diff: "@@ -1 +1 @@\n-old\n+new" } }} prompt="" columns={140} rows={40} inspectorTab="diff" inspectorFocused />,
       { columns: 140 },
-    );
+    ));
     expect(diffOutput).toContain("CODE · DIFF");
     expect(diffOutput).toContain("[DIFF]");
     expect(diffOutput).toContain("+new");
 
-    const fileOutput = renderToString(
+    const fileOutput = plain(renderToString(
       <SplitlaneView snapshot={{ ...snapshot, evidencePreview: { file: "src/example.ts", content: "    1 │ const safe = true;", error: null } }} prompt="" columns={140} rows={40} inspectorTab="file" />,
       { columns: 140 },
-    );
+    ));
     expect(fileOutput).toContain("CODE · FILE");
     expect(fileOutput).toContain("src/example.ts");
     expect(fileOutput).toContain("const safe = true;");
 
-    const noticeOutput = renderToString(
+    const noticeOutput = plain(renderToString(
       <SplitlaneView snapshot={{ ...snapshot, notice: "Role handoff requires completed output." }} prompt="" columns={80} rows={24} />,
       { columns: 80 },
-    );
+    ));
     expect(noticeOutput.split("\n")).toHaveLength(24);
     expect(noticeOutput).not.toContain("CODE · EVIDENCE");
     expect(noticeOutput).toContain("CLAUDE");
     expect(noticeOutput).toContain("CODEX");
     expect(noticeOutput).toContain("C [RUNNING] · X [READY]");
 
-    const focusedOutput = renderToString(
+    const focusedOutput = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="" columns={80} rows={24} viewMode="focused" />,
       { columns: 80 },
-    );
+    ));
     expect(focusedOutput).toContain("VIEW FOCUSED");
     expect(focusedOutput).toContain("CODE · CHANGES");
     expect(focusedOutput).toContain("● CODEX");
     expect(focusedOutput).not.toContain("● CLAUDE");
 
-    const activity = renderToString(
+    const activity = plain(renderToString(
       <SplitlaneView snapshot={{ ...snapshot, focusedProvider: "claude" }} prompt="" columns={90} rows={30} overlay="activity" activityExpanded />,
       { columns: 90 },
-    );
+    ));
     expect(activity).toContain("ACTIVITY · SANITIZED + BOUNDED");
     expect(activity).toContain("bun test -- 한글");
     expect(activity).toContain("safety: read-only");
 
-    const flowStart = renderToString(
+    const flowStart = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="안전하게 구현해줘" columns={80} rows={24} overlay="flow_start" writerConfirm />,
       { columns: 80 },
-    );
+    ));
     expect(flowStart).toContain("TASK FLOW · CODEX BUILD → CLAUDE CHALLENGE · CONFIRM");
     expect(flowStart).toContain("completion prepares a separate");
     expect(flowStart).toContain("Claude challenge confirmation");
@@ -1176,7 +1194,10 @@ describe("terminal rendering", () => {
       { columns: 90 },
     );
     expect(configuration).toContain("STRICT JSON");
-    expect(configuration).toContain(".splitlane/config.json");
+    // The config path is absolute, so how far into the box it wraps depends on
+    // where the checkout lives. Rejoin the wrapped line before matching, or the
+    // assertion passes only for repositories with a short enough path.
+    expect(plain(configuration).replace(/[\s║]+/g, "")).toContain(".splitlane/config.json");
 
     const restore = renderToString(
       <SplitlaneView snapshot={{ ...snapshot, restorableSessions: [{ provider: "claude", sessionId: "opaque-session", requestedModel: "default", effectiveModel: "default", providerVersion: "fake/1", updatedAt: new Date(0).toISOString(), interrupted: true }] }} prompt="" columns={90} rows={30} overlay="restore" restoreInspect destructiveConfirm />,
@@ -1430,9 +1451,9 @@ describe("layout safety and modal visibility", () => {
       <SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={50} rows={14} />,
       { columns: 50 },
     );
-    expect(tooSmall).toContain("TERMINAL TOO SMALL");
-    expect(tooSmall).toContain("COMPARE");
-    expect(tooSmall).toContain("writer NONE");
+    expect(plain(tooSmall)).toContain("TERMINAL TOO SMALL");
+    expect(plain(tooSmall)).toContain("COMPARE");
+    expect(plain(tooSmall)).toContain("writer NONE");
     expect(tooSmall).toContain("50×14");
     expect(tooSmall).toContain(`${MIN_COLUMNS}×${minimumRows(MIN_COLUMNS)}`);
     expect(tooSmall).toContain("^Q quit");
@@ -1466,8 +1487,8 @@ describe("layout safety and modal visibility", () => {
       { columns: 140 },
     );
     expect(output).toContain("codex is unavailable");
-    expect(output).toContain("C [RUNNING]");
-    expect(output).toContain("X [BLOCKED]");
+    expect(plain(output)).toContain("C [RUNNING]");
+    expect(plain(output)).toContain("X [BLOCKED]");
     expect(output).toContain("Modal open");
   });
 
@@ -1501,7 +1522,7 @@ describe("layout safety and modal visibility", () => {
       <SplitlaneView snapshot={snapshot} prompt="안녕~" columns={120} rows={30} composerMode="direct" />,
       { columns: 120 },
     );
-    expect(screen).toContain("send CODEX");
+    expect(plain(screen)).toContain("send CODEX");
     expect(screen).toContain("Enter send");
     // The build workflow stays discoverable from the read-only default.
     expect(screen).toContain("⌥D build task");
@@ -1530,10 +1551,16 @@ describe("layout safety and modal visibility", () => {
 
     const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
     const handler = source.slice(source.indexOf("useInput((input, key)"));
+    // Ink reports Ctrl+G as a bare "g", so a grant keyed off the letter alone
+    // would hand out the lease to whoever pressed the help shortcut at the
+    // confirmation step. Every overlay letter goes through `letter`, which is
+    // empty for a modified keystroke.
+    expect(handler).toContain('const letter = key.ctrl || key.meta ? "" : input.toLowerCase();');
     for (const overlay of ["flow_start", "writer"]) {
       const start = handler.indexOf(`if (overlay === "${overlay}")`);
       const branch = handler.slice(start, handler.indexOf("\n    }", start));
-      expect(branch).toContain('input.toLowerCase() === "g" && writerConfirm');
+      expect(branch).toContain('letter === "g" && writerConfirm');
+      expect(branch).not.toContain('input.toLowerCase() === "g"');
       // `key.return` may only reach the confirmation, never past it.
       expect(branch).not.toMatch(/else if \(key\.return\)\s*\{/);
     }
@@ -1683,6 +1710,30 @@ describe("layout safety and modal visibility", () => {
     }
   });
 
+  test("a Ctrl shortcut never doubles as an action key inside an overlay", () => {
+    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
+    const handler = source.slice(source.indexOf("useInput((input, key)"));
+    // Ink reports Ctrl+<letter> as the bare letter with key.ctrl set, so any
+    // action compared against the letter alone also fires for the Ctrl shortcut
+    // sharing it: Ctrl+G granted the writer lease, Ctrl+A allowed an approval,
+    // Ctrl+D discarded an isolated run. Every letter action goes through
+    // `letter`, which is empty for a modified keystroke.
+    const offenders = handler.split("\n").filter((line) =>
+      line.includes("input.toLowerCase() ===") && !line.includes("key.meta"));
+    expect(offenders).toEqual([]);
+    for (const [overlay, armed] of [["approval", 'letter === "a"'], ["isolated", 'letter === "d"']] as const) {
+      const start = handler.indexOf(`if (overlay === "${overlay}") {`);
+      expect(start).toBeGreaterThan(-1);
+      expect(handler.slice(start, handler.indexOf("\n    }", start))).toContain(armed);
+    }
+    // The inspector holds focus over a read-only panel. Text keys have to stop
+    // there: falling through built a prompt the user never saw typed, and the
+    // next Enter opened the writer-grant gate on it.
+    const inspector = handler.slice(handler.indexOf("if (inspectorFocused) {"));
+    expect(inspector.slice(0, inspector.indexOf("\n    }"))).toContain(
+      "if (key.return || key.backspace || key.delete || (!key.ctrl && !key.meta && input)) return;");
+  });
+
   test("doctor separates a missing project path from an unreadable repository", async () => {
     const fixture = join(process.cwd(), "test", "fixtures", "fake-doctor-provider.mjs");
     const providers = {
@@ -1758,6 +1809,40 @@ describe("M2 workspace guard", () => {
       expect(orchestrator.getSnapshot().notice).toContain("retained baseline");
       await orchestrator.refreshEvidence();
       expect(orchestrator.getSnapshot().git.evidence).not.toContainEqual({ path: "writer.txt", classification: "pre-existing" });
+    } finally {
+      await orchestrator.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("revoking the writer by hand ends the build cycle and drops the baseline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-m2-cycle-"));
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") });
+    try {
+      await gitCommand(root, "init", "-q");
+      await gitCommand(root, "config", "user.email", "test@example.invalid");
+      await gitCommand(root, "config", "user.name", "Splitlane Test");
+      await Bun.write(join(root, "existing.txt"), "committed\n");
+      await gitCommand(root, "add", "existing.txt");
+      await gitCommand(root, "commit", "-qm", "baseline");
+
+      await orchestrator.initialize();
+      expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+      expect(orchestrator.getSnapshot().git.baselineFingerprint).not.toBeNull();
+
+      // ^W is the user ending the build, not an automatic post-turn revocation.
+      // A baseline that outlived it would blame the next writer for whatever was
+      // edited in between and pull those files into that writer's review diff.
+      await orchestrator.revokeWriter();
+      expect(orchestrator.getSnapshot().writer).toBeNull();
+      expect(orchestrator.getSnapshot().git.baselineFingerprint).toBeNull();
+      expect(orchestrator.getSnapshot().notice).toContain("review baseline was cleared");
+
+      await Bun.write(join(root, "by-hand.txt"), "typed by the user\n");
+      expect(await orchestrator.promoteWriter("codex", true)).toBe(true);
+      expect(orchestrator.getSnapshot().notice).not.toContain("retained baseline");
+      await orchestrator.refreshEvidence();
+      expect(orchestrator.getSnapshot().git.evidence).toContainEqual({ path: "by-hand.txt", classification: "pre-existing" });
     } finally {
       await orchestrator.close();
       await rm(root, { recursive: true, force: true });
@@ -1975,6 +2060,62 @@ describe("isolated worktree lifecycle", () => {
       expect(await Bun.file(dirtyFile).text()).toBe("must survive\n");
       expect((await gitResult(root, "show-ref", "--verify", `refs/heads/${active.lanes.claude.branch}`)).exitCode).toBe(0);
       expect(await orchestrator.prepareIsolated()).toBe(true);
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("a freshly created run reports its directories instead of claiming none exist", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      expect(await orchestrator.startIsolated()).toBe(true);
+      // No refresh in between: the snapshot published by activation is what the
+      // UI renders, and a false `present` there showed both healthy lanes as
+      // NO DIRECTORY and persisted the same claim into the manifest.
+      const active = orchestrator.getSnapshot().isolated!;
+      expect(active.lanes.claude.present).toBe(true);
+      expect(active.lanes.codex.present).toBe(true);
+      const manifest = JSON.parse(await Bun.file(active.manifestPath).text());
+      expect(manifest.lanes.claude.present).toBe(true);
+      const screen = renderToString(<SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={120} rows={30} overlay="isolated" />, { columns: 120 });
+      expect(plain(screen)).not.toContain("NO DIRECTORY");
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("discard keeps worktrees whose presence it could not confirm", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      expect(await orchestrator.startIsolated()).toBe(true);
+      const active = orchestrator.getSnapshot().isolated!;
+      const dirtyFile = join(active.lanes.claude.path, "uncommitted.txt");
+      await Bun.write(dirtyFile, "must survive\n");
+
+      // When inspection fails, discard used to fall back to the snapshot it was
+      // handed — and a manifest written before activation says present: false for
+      // both lanes. Trusting that took the recursive-remove branch and destroyed
+      // the worktrees living inside the run directory, which is the one thing
+      // this escape hatch exists to avoid.
+      class BrokenInspectManager extends WorktreeManager {
+        override async inspect(): Promise<IsolatedRunSnapshot> {
+          throw new Error("inspection is unavailable");
+        }
+      }
+      const manager = new BrokenInspectManager(config.stateDirectory, root);
+      const unInspected = { ...active, lanes: { claude: { ...active.lanes.claude, present: false }, codex: { ...active.lanes.codex, present: false } } };
+      const result = await manager.discard(unInspected);
+      expect(result.remainingPaths).toContain(active.lanes.claude.path);
+      expect(await Bun.file(dirtyFile).text()).toBe("must survive\n");
+      expect(await Bun.file(join(active.lanes.codex.path, ".git")).exists()).toBe(true);
     } finally {
       await orchestrator.close();
       await rm(outer, { recursive: true, force: true });

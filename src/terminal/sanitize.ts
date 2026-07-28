@@ -5,9 +5,13 @@ export function sanitizeTerminalText(value: unknown): string {
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\x1b[@-_]/g, "")
     // A bare carriage return rewrites the line already on screen, which is
-    // enough to spoof a decision that was never made ("denied\r approved").
-    // Newlines keep every frame visible instead.
-    .replace(/\r\n?/g, "\n")
+    // enough to spoof a decision that was never made ("denied\r approved"), so
+    // it must not survive into the snapshot. Turning it into a newline instead
+    // would multiply lines: providers redraw progress meters with a bare CR, and
+    // one spinner would evict every real line from the bounded lane buffer. A
+    // separator keeps each frame visible on one line and erases nothing.
+    .replace(/\r\n/g, "\n")
+    .replace(/\r+/g, " ")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
