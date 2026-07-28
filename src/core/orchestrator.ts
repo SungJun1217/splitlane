@@ -84,9 +84,6 @@ export class CompareOrchestrator {
   readonly #git: GitObserver;
   readonly #workspace: WorkspaceGuard;
   #revokeAfterTurn: ProviderId | null = null;
-  /** Set when the pending revocation is a deliberate end of the build cycle, so
-   * the Git baseline is dropped with the lease instead of outliving it. */
-  #endBuildCycleOnRevocation = false;
   #gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   #promotionPending = false;
   #reviewPending = false;
@@ -930,10 +927,6 @@ export class CompareOrchestrator {
     }
     const writer = this.#snapshot.writer;
     if (!writer) return;
-    // Revoking by hand ends the build cycle, so the baseline it carried must go
-    // with it. Only the automatic revocations after a failed or cancelled turn
-    // keep it, which is what lets the next promotion resume the same cycle.
-    this.#endBuildCycleOnRevocation = true;
     const lane = this.#snapshot.lanes[writer];
     if (["STARTING", "RUNNING", "BLOCKED", "CANCELLING"].includes(lane.status)) {
       this.#revokeAfterTurn = writer;
@@ -941,21 +934,23 @@ export class CompareOrchestrator {
       await this.cancel(writer);
       return;
     }
-    this.#completeRevocation(writer);
+    // Revoking by hand ends the build cycle. `#revokeAfterTurn` carries the same
+    // intent across the cancel above, so every deferred completion passes
+    // `endedCycle` from it rather than from separately tracked state.
+    this.#completeRevocation(writer, true);
   }
 
-  #completeRevocation(provider: ProviderId): void {
+  /** `endedCycle` says the build cycle is over, not just this lease. Only the
+   * user ending a build sets it: the automatic revocations after a failed or
+   * cancelled turn leave the baseline in place so the next promotion resumes the
+   * same cycle. A stale baseline outliving the cycle would make hand edits look
+   * like the next writer's work and pull them into its review diff. */
+  #completeRevocation(provider: ProviderId, endedCycle = false): void {
     if (this.#snapshot.writer !== provider) return;
     const lease = this.#snapshot.writerLease;
     this.#resolveApprovalsFor(provider, "cancel_turn");
     if (lease) this.#workspace.revoke(lease.id);
-    // The lease is always surrendered here. The baseline only goes with it when
-    // the build cycle itself ended: a stale baseline outliving the cycle would
-    // make hand edits look like the next writer's work and pull them into that
-    // writer's review diff. See promoteWriter.
-    const endedCycle = this.#endBuildCycleOnRevocation;
     if (endedCycle) this.#git.clearBaseline();
-    this.#endBuildCycleOnRevocation = false;
     this.#revokeAfterTurn = null;
     this.#patch({
       mode: "compare",
@@ -1654,7 +1649,7 @@ export class CompareOrchestrator {
         detail: (error as Error).message,
         safetyEffect: null,
       });
-      if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+      if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider, this.#revokeAfterTurn === provider);
       if (metaDispatch && providerTurnStarted) this.#completeMetaTurn(provider, "failed");
       else if (metaDispatch) this.#abandonMetaTurn(provider);
     } finally {
@@ -1714,7 +1709,7 @@ export class CompareOrchestrator {
         safetyEffect: "provider isolation preserved",
         timestamp: providerEvent.timestamp,
       });
-      if (this.#snapshot.writer === provider) this.#completeRevocation(provider);
+      if (this.#snapshot.writer === provider) this.#completeRevocation(provider, this.#revokeAfterTurn === provider);
       return;
     }
     const lane = this.#snapshot.lanes[provider];
@@ -1817,7 +1812,7 @@ export class CompareOrchestrator {
         this.#markIsolatedProcess(provider, "idle");
         this.#patchLane(provider, { status: "COMPLETED", turnId: null });
         this.#refreshEvidence();
-        if (this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+        if (this.#revokeAfterTurn === provider) this.#completeRevocation(provider, true);
         this.#persistSession(provider, true);
         break;
       case "turn.cancelled":
@@ -1826,7 +1821,7 @@ export class CompareOrchestrator {
         this.#markIsolatedProcess(provider, "idle");
         this.#patchLane(provider, { status: "CANCELLED", turnId: null });
         this.#refreshEvidence();
-        if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+        if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider, this.#revokeAfterTurn === provider);
         this.#persistSession(provider, true);
         break;
       case "turn.failed":
@@ -1850,7 +1845,7 @@ export class CompareOrchestrator {
           timestamp: providerEvent.timestamp,
         });
         this.#refreshEvidence();
-        if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+        if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider, this.#revokeAfterTurn === provider);
         this.#persistSession(provider, true);
         break;
       case "provider.warning":
@@ -1897,7 +1892,7 @@ export class CompareOrchestrator {
       const losesLease = this.#snapshot.writer === provider || this.#revokeAfterTurn === provider;
       // Revoke first: #completeRevocation posts its own notice, so the
       // abandonment message has to be written after it to survive.
-      if (losesLease) this.#completeRevocation(provider);
+      if (losesLease) this.#completeRevocation(provider, this.#revokeAfterTurn === provider);
       this.#patch({ notice: losesLease
         ? `${provider} was abandoned during startup before a turn began; its CLI process is terminated when Splitlane exits, and its writer lease was revoked because an abandoned startup cannot be proven idle. Re-grant with ^B to keep building.`
         : `${provider} was abandoned during startup before a turn began; its CLI process is terminated when Splitlane exits.` });
@@ -1919,7 +1914,7 @@ export class CompareOrchestrator {
         errorKind: classifyProviderError((error as Error).message),
         ...(invalidated ? { sessionId: null, effectiveModel: null, turnId: null } : {}),
       });
-      if (this.#snapshot.writer === provider) this.#completeRevocation(provider);
+      if (this.#snapshot.writer === provider) this.#completeRevocation(provider, this.#revokeAfterTurn === provider);
     }
   }
 

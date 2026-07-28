@@ -10,8 +10,7 @@ export function sanitizeTerminalText(value: unknown): string {
     // would multiply lines: providers redraw progress meters with a bare CR, and
     // one spinner would evict every real line from the bounded lane buffer. A
     // separator keeps each frame visible on one line and erases nothing.
-    .replace(/\r\n/g, "\n")
-    .replace(/\r+/g, " ")
+    .replace(/\r\n|\r+/g, (match) => match === "\r\n" ? "\n" : " ")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 

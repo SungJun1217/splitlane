@@ -16,6 +16,14 @@ async function git(root: string, args: readonly string[], maxOutput = 200_000) {
   });
 }
 
+/** The fail-closed presence check the destructive paths share: only a definite
+ * ENOENT proves a worktree is gone, so an unreadable directory is still treated
+ * as holding work. `inspect` deliberately does not use this — there, any
+ * unreadable path is reported absent so a broken run stays cleanable. */
+async function definitelyAbsent(path: string): Promise<boolean> {
+  return stat(path).then(() => false, (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
+}
+
 function lane(provider: ProviderId, path: string, branch: string, baseCommit: string): IsolatedLaneWorkspace {
   return { provider, path, branch, baseCommit, processState: "idle", dirty: false, head: baseCommit, present: false, error: null };
 }
@@ -186,14 +194,10 @@ export class WorktreeManager {
     // Presence is checked directly rather than through `inspect`, whose failure
     // path used to fall back to a snapshot that merely defaults `present` to
     // false. Both lanes then looked absent and the recursive removal below
-    // deleted the run directory holding them. Anything but a definite ENOENT
-    // counts as present, so an unreadable directory keeps its worktrees.
-    const remainingPaths: string[] = [];
-    for (const provider of ["claude", "codex"] as const) {
-      const path = run.lanes[provider].path;
-      const absent = await stat(path).then(() => false, (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
-      if (!absent) remainingPaths.push(path);
-    }
+    // deleted the run directory holding them.
+    const paths = (["claude", "codex"] as const).map((provider) => run.lanes[provider].path);
+    const absent = await Promise.all(paths.map(definitelyAbsent));
+    const remainingPaths = paths.filter((_, index) => !absent[index]);
     const remainingBranches: string[] = [];
     for (const provider of ["claude", "codex"] as const) {
       const branch = run.lanes[provider].branch;
@@ -211,10 +215,8 @@ export class WorktreeManager {
   /** The run directory only holds the manifest once both worktrees are gone.
    * Leaving it behind makes every later startup re-parse a dead run. */
   async #removeRunDirectory(run: IsolatedRunSnapshot): Promise<void> {
-    for (const provider of ["claude", "codex"] as const) {
-      const present = await stat(run.lanes[provider].path).then(() => true, () => false);
-      if (present) return;
-    }
+    const absent = await Promise.all((["claude", "codex"] as const).map((provider) => definitelyAbsent(run.lanes[provider].path)));
+    if (!absent.every((gone) => gone)) return;
     await rm(dirname(run.manifestPath), { recursive: true, force: true }).catch(() => undefined);
   }
 

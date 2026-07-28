@@ -57,8 +57,9 @@ import { WorktreeManager } from "./worktree/manager.ts";
 
 /** `renderToString` emits SGR codes whenever colour is enabled, and they land in
  * the middle of phrases like `writer NONE`. Assertions about wording strip them
- * so a test does not pass or fail on whether the terminal supports colour. */
-const plain = (screen: string) => screen.replace(/\[[0-9;]*m/g, "");
+ * with the same sanitizer the app uses, so a test does not pass or fail on
+ * whether the terminal supports colour. */
+const plain = sanitizeTerminalText;
 
 type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed" | "wedged_start" | "slow_start";
 
@@ -1447,13 +1448,13 @@ describe("layout safety and modal visibility", () => {
     expect(fitsTerminal(MIN_COLUMNS - 1, 60)).toBe(false);
 
     const { orchestrator } = setup();
-    const tooSmall = renderToString(
+    const tooSmall = plain(renderToString(
       <SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={50} rows={14} />,
       { columns: 50 },
-    );
-    expect(plain(tooSmall)).toContain("TERMINAL TOO SMALL");
-    expect(plain(tooSmall)).toContain("COMPARE");
-    expect(plain(tooSmall)).toContain("writer NONE");
+    ));
+    expect(tooSmall).toContain("TERMINAL TOO SMALL");
+    expect(tooSmall).toContain("COMPARE");
+    expect(tooSmall).toContain("writer NONE");
     expect(tooSmall).toContain("50×14");
     expect(tooSmall).toContain(`${MIN_COLUMNS}×${minimumRows(MIN_COLUMNS)}`);
     expect(tooSmall).toContain("^Q quit");
@@ -1482,13 +1483,13 @@ describe("layout safety and modal visibility", () => {
         codex: { ...base.lanes.codex, status: "BLOCKED" },
       },
     };
-    const output = renderToString(
+    const output = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="task" columns={140} rows={40} overlay="flow_start" writerConfirm />,
       { columns: 140 },
-    );
+    ));
     expect(output).toContain("codex is unavailable");
-    expect(plain(output)).toContain("C [RUNNING]");
-    expect(plain(output)).toContain("X [BLOCKED]");
+    expect(output).toContain("C [RUNNING]");
+    expect(output).toContain("X [BLOCKED]");
     expect(output).toContain("Modal open");
   });
 
@@ -1518,11 +1519,11 @@ describe("layout safety and modal visibility", () => {
     const snapshot = orchestrator.getSnapshot();
     expect(snapshot.mode).toBe("compare");
     expect(snapshot.writer).toBeNull();
-    const screen = renderToString(
+    const screen = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="안녕~" columns={120} rows={30} composerMode="direct" />,
       { columns: 120 },
-    );
-    expect(plain(screen)).toContain("send CODEX");
+    ));
+    expect(screen).toContain("send CODEX");
     expect(screen).toContain("Enter send");
     // The build workflow stays discoverable from the read-only default.
     expect(screen).toContain("⌥D build task");
@@ -1700,13 +1701,12 @@ describe("layout safety and modal visibility", () => {
       const start = handler.indexOf(`if (overlay === "${overlay}")`);
       expect(start).toBeGreaterThan(-1);
       const branch = handler.slice(start, handler.indexOf("\n    }", start));
+      // These two branches append to a field, so a bare letter action reached
+      // before the append would make that letter impossible to type — and here
+      // it would fire a destructive action mid-word. The handler-wide scan for
+      // bare-letter actions lives in the next test.
       expect(branch).toContain(overlay === "review" ? "setReviewCriteria" : "setModelDraft");
-      // A bare letter comparison is reached before the text-append branch, so
-      // that letter becomes impossible to type into the field — and here it
-      // would fire a destructive action mid-word.
-      const offenders = branch.split("\n").filter((line) =>
-        line.includes("input.toLowerCase() ===") && !line.includes("key.meta") && !line.includes("key.ctrl"));
-      expect(offenders).toEqual([]);
+      expect(branch).not.toContain("letter ===");
     }
   });
 
@@ -2081,8 +2081,8 @@ describe("isolated worktree lifecycle", () => {
       expect(active.lanes.codex.present).toBe(true);
       const manifest = JSON.parse(await Bun.file(active.manifestPath).text());
       expect(manifest.lanes.claude.present).toBe(true);
-      const screen = renderToString(<SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={120} rows={30} overlay="isolated" />, { columns: 120 });
-      expect(plain(screen)).not.toContain("NO DIRECTORY");
+      const screen = plain(renderToString(<SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={120} rows={30} overlay="isolated" />, { columns: 120 }));
+      expect(screen).not.toContain("NO DIRECTORY");
     } finally {
       await orchestrator.close();
       await rm(outer, { recursive: true, force: true });
