@@ -42,6 +42,17 @@ jobs:
             echo "Release tags must use stable SemVer, for example v0.0.1" >&2
             exit 1
           fi
+          # The updater takes the expected version from the tag and rejects a
+          # downloaded binary whose own --version disagrees. A tag that does not
+          # match package.json therefore publishes a release that every existing
+          # installation refuses to install, which is invisible from the release
+          # page itself. Fail before building instead.
+          packaged=$(node -p 'require("./package.json").version')
+          if [ "v$packaged" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $packaged" >&2
+            echo "Bump package.json, commit it, and tag that commit." >&2
+            exit 1
+          fi
       - name: Install frozen dependencies
         run: bun install --frozen-lockfile
       - name: Verify offline
