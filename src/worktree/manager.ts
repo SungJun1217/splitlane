@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { IsolatedLaneWorkspace, IsolatedRunSnapshot, ProviderId } from "../domain.ts";
 import { projectIdentity } from "../session/store.ts";
@@ -17,7 +17,7 @@ async function git(root: string, args: readonly string[], maxOutput = 200_000) {
 }
 
 function lane(provider: ProviderId, path: string, branch: string, baseCommit: string): IsolatedLaneWorkspace {
-  return { provider, path, branch, baseCommit, processState: "idle", dirty: false, head: baseCommit, error: null };
+  return { provider, path, branch, baseCommit, processState: "idle", dirty: false, head: baseCommit, present: false, error: null };
 }
 
 export class WorktreeManager {
@@ -110,6 +110,13 @@ export class WorktreeManager {
     this.#validate(run);
     const entries = await Promise.all((["claude", "codex"] as const).map(async (provider) => {
       const workspace = run.lanes[provider];
+      // A directory that is not there cannot be dirty or unreadable. Reporting
+      // it as an inspection error is what used to make a failed run
+      // permanently un-cleanable, and so permanently blocking.
+      const present = await stat(workspace.path).then((entry) => entry.isDirectory(), () => false);
+      if (!present) {
+        return [provider, { ...workspace, dirty: false, present: false, error: null }] as const;
+      }
       const [status, head] = await Promise.all([
         git(workspace.path, ["status", "--porcelain=v1", "--untracked-files=all"]),
         git(workspace.path, ["rev-parse", "--verify", "HEAD"]),
@@ -118,6 +125,7 @@ export class WorktreeManager {
         ...workspace,
         dirty: Boolean(status.stdout.trim()),
         head: head.exitCode === 0 ? head.stdout.trim() : workspace.head,
+        present: true,
         error: status.exitCode === 0 && head.exitCode === 0 ? null : sanitizeTerminalText(status.stderr || head.stderr || "Worktree inspection failed"),
       };
       return [provider, next] as const;
@@ -135,19 +143,66 @@ export class WorktreeManager {
     const active = (["claude", "codex"] as const).find((provider) => inspected.lanes[provider].processState !== "idle");
     if (active) throw new Error(`${active} isolated process was not recorded idle; retained because cleanup cannot prove the worktree is inactive.`);
     for (const provider of ["claude", "codex"] as const) {
+      // Nothing to protect when the directory is already gone; the guard exists
+      // to avoid removing a worktree that still holds unintegrated work.
+      if (!inspected.lanes[provider].present) continue;
       const integrated = await git(this.projectRoot, ["merge-base", "--is-ancestor", inspected.lanes[provider].head, "HEAD"]);
       if (integrated.exitCode !== 0) {
         throw new Error(`${provider} worktree has commits not integrated into the primary branch; retained for recovery.`);
       }
     }
+    let pruneNeeded = false;
     for (const provider of ["claude", "codex"] as const) {
       const workspace = inspected.lanes[provider];
+      if (!workspace.present) {
+        pruneNeeded = true;
+        continue;
+      }
       const result = await git(this.projectRoot, ["worktree", "remove", workspace.path]);
       if (result.exitCode !== 0) throw new Error(`${provider} clean worktree removal failed: ${result.stderr || result.stdout}`);
     }
-    const cleaned = { ...inspected, lifecycle: "cleaned" as const };
+    // Only touches Git's worktree bookkeeping for directories that no longer
+    // exist. It never removes a branch or a commit.
+    if (pruneNeeded) await git(this.projectRoot, ["worktree", "prune"]);
+    const cleaned = { ...inspected, lifecycle: "cleaned" as const, lanes: Object.fromEntries((["claude", "codex"] as const)
+      .map((provider) => [provider, { ...inspected.lanes[provider], present: false }])) as Record<ProviderId, IsolatedLaneWorkspace> };
     await this.writeManifest(cleaned);
+    await this.#removeRunDirectory(cleaned);
     return cleaned;
+  }
+
+  /** Drops only Splitlane's tracking of a run. Worktree directories and branches
+   * are left exactly as they are, so this is the escape hatch when cleanup
+   * cannot prove a run is safe to remove and the run would otherwise block
+   * isolated mode forever. */
+  async discard(run: IsolatedRunSnapshot): Promise<{ remainingPaths: readonly string[]; remainingBranches: readonly string[] }> {
+    this.#validate(run);
+    const inspected = await this.inspect(run).catch(() => run);
+    const remainingPaths = (["claude", "codex"] as const)
+      .filter((provider) => inspected.lanes[provider].present)
+      .map((provider) => inspected.lanes[provider].path);
+    const remainingBranches: string[] = [];
+    for (const provider of ["claude", "codex"] as const) {
+      const branch = inspected.lanes[provider].branch;
+      const exists = await git(this.projectRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+      if (exists.exitCode === 0) remainingBranches.push(branch);
+    }
+    // The worktrees live *inside* the run directory, so only the manifest may be
+    // removed while either of them is still on disk. Removing the directory
+    // would destroy uncommitted work in the very case this exists to rescue.
+    if (remainingPaths.length) await rm(run.manifestPath, { force: true });
+    else await rm(dirname(run.manifestPath), { recursive: true, force: true });
+    return { remainingPaths, remainingBranches };
+  }
+
+  /** The run directory only holds the manifest once both worktrees are gone.
+   * Leaving it behind makes every later startup re-parse a dead run. */
+  async #removeRunDirectory(run: IsolatedRunSnapshot): Promise<void> {
+    for (const provider of ["claude", "codex"] as const) {
+      const present = await stat(run.lanes[provider].path).then(() => true, () => false);
+      if (present) return;
+    }
+    await rm(dirname(run.manifestPath), { recursive: true, force: true }).catch(() => undefined);
   }
 
   async retain(run: IsolatedRunSnapshot): Promise<IsolatedRunSnapshot> {
@@ -178,6 +233,10 @@ export class WorktreeManager {
         this.#validate(value);
         if (value.lifecycle !== "cleaned") runs.push(value);
       } catch (error) {
+        // A directory with no manifest is a discarded run whose worktrees the
+        // user chose to keep. Splitlane no longer tracks it, so warning about it
+        // on every startup would be noise the user cannot act on here.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         this.#recoveryWarnings.push(`${sanitizeTerminalText(runId)}: ${sanitizeTerminalText((error as Error).message) || "invalid isolated manifest"}`);
       }
     }

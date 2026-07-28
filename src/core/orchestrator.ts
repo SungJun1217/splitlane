@@ -101,6 +101,10 @@ export class CompareOrchestrator {
   readonly #metaDispatches = new Map<ProviderId, MetaDispatch>();
   readonly #metaTextBuffers = new Map<ProviderId, string>();
   #twoLensPriorSessions: Map<ProviderId, SessionHandle> | null = null;
+  /** Monotonic per-lane run token. Abandoning a lane that is stuck in startup
+   * bumps it, which is how the abandoned run's own patches and events are
+   * recognized as stale and dropped. */
+  readonly #laneRun: Record<ProviderId, number> = { claude: 0, codex: 0 };
   #snapshot: AppSnapshot;
 
   constructor(
@@ -644,8 +648,29 @@ export class CompareOrchestrator {
   async startIsolated(): Promise<boolean> {
     const plan = this.#snapshot.isolated;
     if (!this.#worktreeManager || !plan || plan.lifecycle !== "preview" || this.#snapshot.mode !== "compare") return false;
+    // A preview survives closing the overlay, so it can be confirmed long after
+    // prepareIsolated checked these. Activation resets both lanes, which would
+    // otherwise discard a running turn's output and let a second turn start in
+    // the same lane.
+    if (this.#snapshot.queue.length || this.#snapshot.queueOffer || this.#snapshot.approvals.length) {
+      this.#patch({ notice: "Isolated mode requires empty queues and no pending approvals; the preview was kept." });
+      return false;
+    }
+    if ((["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+      this.#patch({ notice: "Isolated mode requires both provider lanes to be idle; the preview was kept." });
+      return false;
+    }
     try {
       const active = await this.#worktreeManager.create(plan);
+      if (this.#snapshot.mode !== "compare" || (["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+        let retained = active;
+        try { retained = await this.#worktreeManager.retain(active); } catch {}
+        this.#patch({ isolated: retained, notice: "Lane state changed while the worktrees were being created, so the run was retained instead of activated. Ctrl+L resolves it." });
+        return false;
+      }
+      // Isolated mode redefines what each lane's tree even is, so a primary-tree
+      // baseline can no longer describe anything.
+      this.#git.clearBaseline();
       for (const provider of ["claude", "codex"] as const) {
         const guard = new WorkspaceGuard(active.lanes[provider].path);
         const lease = guard.grant(provider, active.baseCommit);
@@ -663,6 +688,7 @@ export class CompareOrchestrator {
         writerLease: null,
         review: null,
         isolated: active,
+        git: this.#git.snapshot,
         notice: "Isolated mode active: each provider writes only in its own worktree; primary tree remains read-only.",
       });
       return true;
@@ -748,6 +774,45 @@ export class CompareOrchestrator {
     }
   }
 
+  /** Cleanup refuses any run it cannot prove is safe to remove, which for a run
+   * whose worktrees are dirty or were never created means it can never succeed —
+   * and a tracked run blocks every new isolated run. Discarding drops only
+   * Splitlane's tracking and reports exactly what is left on disk. */
+  async discardIsolated(): Promise<boolean> {
+    const run = this.#snapshot.isolated;
+    if (!this.#worktreeManager || !run || run.lifecycle === "preview" || run.lifecycle === "cleaned") return false;
+    if (this.#snapshot.queue.length || this.#snapshot.queueOffer) {
+      this.#patch({ notice: "Remove queued isolated requests before discarding the run; frozen authority will not be changed silently." });
+      return false;
+    }
+    if ((["claude", "codex"] as const).some((provider) => !canAccept(this.#snapshot.lanes[provider]))) {
+      this.#patch({ notice: "Discarding an isolated run requires both provider processes to be idle." });
+      return false;
+    }
+    try {
+      await this.#worktreeWrite;
+      const { remainingPaths, remainingBranches } = await this.#worktreeManager.discard(this.#snapshot.isolated ?? run);
+      this.#leaveIsolatedSessions();
+      this.#revokeIsolatedLeases();
+      const remaining = await this.#worktreeManager.recoverable();
+      const left = [
+        remainingPaths.length ? `${remainingPaths.length} worktree director${remainingPaths.length === 1 ? "y" : "ies"}` : "",
+        remainingBranches.length ? `${remainingBranches.length} branch${remainingBranches.length === 1 ? "" : "es"}` : "",
+      ].filter(Boolean).join(" and ");
+      this.#patch({
+        mode: "compare",
+        isolated: remaining[0] ?? null,
+        notice: left
+          ? `Stopped tracking isolated run ${run.runId}. Nothing was deleted: ${left} remain on disk (${[...remainingPaths, ...remainingBranches].join(" · ")}).`
+          : `Stopped tracking isolated run ${run.runId}; no worktree directory or branch was left behind.`,
+      });
+      return true;
+    } catch (error) {
+      this.#patch({ notice: `Unable to stop tracking the isolated run: ${sanitizeTerminalText((error as Error).message)}` });
+      return false;
+    }
+  }
+
   isolatedIntegrationCommands(): Record<ProviderId, readonly string[]> | null {
     return this.#worktreeManager && this.#snapshot.isolated ? this.#worktreeManager.integrationCommands(this.#snapshot.isolated) : null;
   }
@@ -814,7 +879,12 @@ export class CompareOrchestrator {
         this.#patch({ notice: "Dirty working tree must be acknowledged before writer promotion." });
         return false;
       }
-      const baselineFingerprint = await this.#git.captureBaseline();
+      // The baseline belongs to the build cycle, not to the lease. Capturing a
+      // fresh one on every promotion would re-classify the edits an earlier
+      // writer turn already made as pre-existing, silently dropping them from
+      // the review diff after a cancelled or failed turn.
+      const retainedBaseline = this.#git.snapshot.baselineFingerprint;
+      const baselineFingerprint = retainedBaseline ?? await this.#git.captureBaseline();
       const lease = this.#workspace.grant(provider, baselineFingerprint);
       this.#patch({
         mode: "build",
@@ -822,7 +892,9 @@ export class CompareOrchestrator {
         writerLease: lease,
         writerRevoking: false,
         git: this.#git.snapshot,
-        notice: `${provider} is the only writer. Network access remains off; prompt target did not change.`,
+        notice: retainedBaseline
+          ? `${provider} is the only writer, continuing from the retained baseline so earlier edits stay in the review diff. Network access remains off.`
+          : `${provider} is the only writer. Network access remains off; prompt target did not change.`,
       });
       this.#lastWriterPrompt = null;
       return true;
@@ -870,7 +942,8 @@ export class CompareOrchestrator {
     const lease = this.#snapshot.writerLease;
     this.#resolveApprovalsFor(provider, "cancel_turn");
     if (lease) this.#workspace.revoke(lease.id);
-    this.#git.clearBaseline();
+    // The lease is always surrendered here, but the baseline is not: only
+    // finishing or abandoning the review cycle ends it. See promoteWriter.
     this.#revokeAfterTurn = null;
     this.#patch({
       mode: "compare",
@@ -1293,7 +1366,8 @@ export class CompareOrchestrator {
       return null;
     }
     const relay = buildFindingsRelay(review.envelope, review.findings);
-    this.#git.clearBaseline();
+    // Returning findings starts a fix round on the same work, so the baseline
+    // stays; the follow-up review must still cover everything the writer did.
     this.#patch({
       mode: "compare",
       review: { ...review, status: "returned" },
@@ -1482,6 +1556,8 @@ export class CompareOrchestrator {
 
   async #runLane(provider: ProviderId, envelope: PromptEnvelope, reviewMechanism?: ReviewMechanism, frozenModel?: string, metaDispatch?: MetaDispatch): Promise<void> {
     const adapter = this.adapters[provider];
+    const run = ++this.#laneRun[provider];
+    const current = () => this.#laneRun[provider] === run;
     this.#markIsolatedProcess(provider, "running");
     let providerTurnStarted = false;
     try {
@@ -1494,6 +1570,7 @@ export class CompareOrchestrator {
       }
       if (!session) {
         session = await adapter.startSession({ projectRoot: workspace.root, requestedModel });
+        if (!current()) return;
         this.#sessions.set(provider, session);
         this.#patchLane(provider, {
           sessionId: session.id || null,
@@ -1519,10 +1596,21 @@ export class CompareOrchestrator {
         ? await adapter.startReview!(session, envelope.prompt, turnOptions)
         : await adapter.startTurn(session, envelope.prompt, turnOptions);
       providerTurnStarted = true;
+      // The lane may have been abandoned while the provider was still starting
+      // up. The turn exists now, so interrupt it rather than stream it into a
+      // lane the user has already been told is finished.
+      if (!current()) {
+        await adapter.interrupt(turn.id).catch((error: unknown) => this.#diagnose(provider, (error as Error).message));
+        return;
+      }
       this.#patchLane(provider, { turnId: turn.id });
       if (this.#revokeAfterTurn === provider) await this.cancel(provider);
-      for await (const providerEvent of turn.events) this.#applyEvent(provider, providerEvent);
+      for await (const providerEvent of turn.events) {
+        if (!current()) break;
+        this.#applyEvent(provider, providerEvent);
+      }
     } catch (error) {
+      if (!current()) return;
       this.#diagnose(provider, (error as Error).message);
       this.#markIsolatedProcess(provider, "idle");
       const invalidated = error instanceof ProviderSessionInvalidatedError;
@@ -1549,7 +1637,7 @@ export class CompareOrchestrator {
       if (metaDispatch && providerTurnStarted) this.#completeMetaTurn(provider, "failed");
       else if (metaDispatch) this.#abandonMetaTurn(provider);
     } finally {
-      this.#markIsolatedProcess(provider, "idle");
+      if (current()) this.#markIsolatedProcess(provider, "idle");
       void this.#scheduleQueue();
     }
   }
@@ -1765,8 +1853,25 @@ export class CompareOrchestrator {
 
   async cancel(provider: ProviderId): Promise<void> {
     const lane = this.#snapshot.lanes[provider];
-    if (!lane.turnId || !["STARTING", "RUNNING", "BLOCKED"].includes(lane.status)) {
+    if (!["STARTING", "RUNNING", "BLOCKED"].includes(lane.status)) {
       this.#patch({ notice: `${provider} has no cancellable turn.` });
+      return;
+    }
+    if (!lane.turnId) {
+      // Startup has not produced a turn to interrupt. A wedged startSession
+      // would otherwise pin the lane in STARTING forever, blocking the queue,
+      // model changes, writer promotion, review, and isolated mode with no way
+      // out but quitting. Abandon the run instead: its token is now stale, so
+      // its patches and events are dropped, and #runLane interrupts the turn if
+      // the provider ever produces one.
+      this.#laneRun[provider] += 1;
+      this.#resolveApprovalsFor(provider, "cancel_turn");
+      this.#abandonMetaTurn(provider);
+      this.#markIsolatedProcess(provider, "idle");
+      this.#patchLane(provider, { status: "CANCELLED", turnId: null });
+      this.#patch({ notice: `${provider} was abandoned during startup before a turn began; its CLI process is terminated when Splitlane exits.` });
+      if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+      void this.#scheduleQueue();
       return;
     }
     this.#resolveApprovalsFor(provider, "cancel_turn");
@@ -1800,9 +1905,16 @@ export class CompareOrchestrator {
     this.#patch({ evidencePreview: preview });
   }
 
+  /** Provider file-change events are the only automatic trigger, so an edit
+   * made outside Splitlane stays invisible until the evidence is rechecked on
+   * request. */
+  async refreshEvidence(): Promise<void> {
+    if (this.#snapshot.mode === "isolated") await this.refreshIsolated();
+    else await this.refreshGit();
+  }
+
   #refreshEvidence(): void {
-    if (this.#snapshot.mode === "isolated") void this.refreshIsolated();
-    else void this.refreshGit();
+    void this.refreshEvidence();
   }
 
   async close(): Promise<void> {

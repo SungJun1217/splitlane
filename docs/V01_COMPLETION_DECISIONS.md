@@ -98,6 +98,24 @@ before. This adds no automatic debate or unbounded loop.
 - Approval modals show provider, safety effect, exact bounded command/tool,
   cwd, affected paths, network effect, and only supported decisions. Read-only
   approval requests remain deny-only and never enter an allow-capable inbox.
+- An arriving approval never takes input away from a modal that already owns it.
+  The inbox opens as soon as input is free; until then the pending count stays
+  visible under the open modal. Stealing focus both discarded the user's draft
+  and put the single-key decisions under fingers that were typing something else.
+- `A` (allow once) requires a second press on the same request. It is the only
+  decision here that grants authority; `D` and `X` stay single-key because they
+  only ever withhold it.
+- An overlay that accepts typing binds no bare letter to an action. A letter
+  compared before the text-append branch is a letter the user cannot type, and in
+  the review overlay it fired a destructive action mid-word. Two-lens review is
+  `Option/Alt+T`. A test asserts this for every text-entry overlay.
+- Focusing the read-only inspector consumes only the inspector's own navigation
+  keys. Global shortcuts — help, the approval inbox, lane cancellation — keep
+  working, and focus is released automatically if a resize takes the inspector
+  off screen.
+- Evidence is rechecked on request with `Ctrl+E`, and when the inspector is
+  shown. Provider file-change events are the only automatic trigger, so an edit
+  made outside Splitlane is otherwise invisible.
 
 ## 2. Queue contract
 
@@ -269,6 +287,18 @@ Claude Code-like behavior after the `v0.0.4` standalone release.
 - Cleanup requires idle provider processes and a clean worktree. Dirty or
   unmerged worktrees are retained with recovery commands; `--force` removal is
   never a product action.
+- A missing worktree directory is not an inspection error. It means the directory
+  was never created or was removed outside Splitlane, so cleanup treats that lane
+  as already removed and runs `git worktree prune` for Git's bookkeeping only.
+  Reporting absence as an error made a half-created run permanently un-cleanable,
+  and therefore permanently blocking.
+- Discarding a run (`D`) is the escape hatch for the case where cleanup must
+  refuse forever but a tracked run blocks every new run. It removes only
+  Splitlane's manifest and reports every directory and branch left on disk. It
+  never deletes a worktree directory, a branch, or a commit — the worktrees live
+  inside the run directory, so the manifest alone is removed while either lane is
+  still present. A run directory that holds no manifest is silently untracked at
+  startup rather than reported as corrupt.
 - Integration is user-controlled. Splitlane provides read-only diff/commit
   evidence and copyable merge or cherry-pick commands, but does not execute an
   automatic merge, cherry-pick, branch deletion, or conflict resolution in

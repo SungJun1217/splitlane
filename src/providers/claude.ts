@@ -290,11 +290,16 @@ export class ClaudeAdapter implements ProviderAdapter {
           }));
         }
       }
+      // interrupt() closes the query stream, which ends this iterator normally
+      // rather than throwing, so the abort has to be checked here too. Without
+      // it every user cancellation surfaces as a lane failure with a
+      // protocol-looking error.
       if (!terminalEventSeen) {
-        queue.push(event(this.provider, "turn.failed", {
+        const cancelled = abortController.signal.aborted;
+        queue.push(event(this.provider, cancelled ? "turn.cancelled" : "turn.failed", {
           sessionId: providerSessionId,
           turnId,
-          payload: { error: "Claude stream ended without a result event" },
+          payload: cancelled ? {} : { error: "Claude stream ended without a result event" },
           rawVersion: this.#version,
         }));
       }
@@ -315,8 +320,10 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
 
   async interrupt(turnId: string): Promise<void> {
-    this.#queries.get(turnId)?.close();
+    // Abort before closing so the consumer always sees the aborted signal,
+    // whichever way the stream ends.
     this.#controllers.get(turnId)?.abort();
+    this.#queries.get(turnId)?.close();
   }
 
   async close(): Promise<void> {

@@ -153,10 +153,10 @@ Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
 | Prompt routing | Direct mode: `Ctrl+R` cycle `CODEX/CLAUDE/BROADCAST` |
 | View | `Option/Alt+0` both/focused · `Alt+1` focus Claude · `Alt+2` focus Codex |
 | Output | `PgUp/PgDn` scroll · `Home` oldest · `End` follow tail |
-| Workflow | `Ctrl+B` promote writer · `Ctrl+W` revoke · `Ctrl+V` review |
-| Evidence | `Option/Alt+I` inspector · `Tab` focus · `[`/`]` tabs · `↑`/`↓` changed-file preview · `Ctrl+T` activity · `Ctrl+F` findings |
-| Control | `Ctrl+A` approvals · `Ctrl+X` cancel focused lane · `Ctrl+K` queue |
-| Advanced | `Option/Alt+H` role handoff · `Ctrl+L` isolated worktrees |
+| Workflow | `Ctrl+B` promote writer · `Ctrl+W` revoke · `Ctrl+V` review · `Option/Alt+T` two-lens review |
+| Evidence | `Option/Alt+I` inspector · `Tab` focus · `[`/`]` tabs · `↑`/`↓` changed-file preview · `Ctrl+E` recheck working tree · `Ctrl+T` activity · `Ctrl+F` findings |
+| Control | `Ctrl+A` approvals (`A` twice to allow once) · `Ctrl+X` cancel focused lane · `Ctrl+K` queue |
+| Advanced | `Option/Alt+H` role handoff · `Ctrl+L` isolated worktrees (`C` clean · `K` retain · `D` stop tracking) |
 | Settings | `Option/Alt+M` models · `Ctrl+O` roles · `Ctrl+P` capabilities · `Ctrl+U` config |
 | Lifecycle | `Ctrl+D` adapter diagnostics · `Ctrl+N` reset focused session · `Ctrl+Q` close and exit |
 
@@ -282,6 +282,12 @@ Confirmation creates one user-state worktree and branch per provider. Splitlane
 never runs setup scripts, stashes or resets files, force-removes worktrees,
 integrates commits, or deletes branches. Dirty or unintegrated worktrees are
 retained for explicit recovery.
+
+A retained run blocks new isolated runs on purpose, and cleanup refuses any run
+it cannot prove is safe to remove. When those two rules meet — a dirty worktree,
+or one that was never created — `D` in the `Ctrl+L` overlay stops tracking the
+run without deleting anything, and names every directory and branch left on
+disk.
 
 </details>
 

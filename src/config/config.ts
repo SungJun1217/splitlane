@@ -73,7 +73,10 @@ export function parseConfig(value: unknown, path = "config"): ConfigFile {
       if (typeof entry.model !== "string" || !entry.model.trim() || entry.model.length > 256) {
         throw new Error(`${path}.providers.${provider}.model must be a non-empty string up to 256 characters.`);
       }
-      if (/[\r\n\0]/.test(entry.model)) throw new Error(`${path}.providers.${provider}.model contains an unsafe control character.`);
+      // A shared project config renders straight into every teammate's
+      // terminal, so escape and control bytes are rejected outright rather than
+      // relying on the render path to strip them.
+      if (/[\x00-\x1f\x7f]/.test(entry.model)) throw new Error(`${path}.providers.${provider}.model contains an unsafe control character.`);
       result.providers[provider] = { model: entry.model.trim() };
     }
   }
