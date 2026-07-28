@@ -96,10 +96,13 @@ splitlane /path/to/project
 ```
 
 The initial mode is `COMPARE`, the writer is `NONE`, and the view shows both
-lanes. The composer starts in `TASK FLOW`: Enter reviews a Codex-only writer
-grant, then a completed build opens a separate Claude challenge confirmation.
-Use `Option/Alt+D` for direct prompts; `Ctrl+R` then selects Codex, Claude, or
-the explicit `BROADCAST` route.
+lanes. The composer starts in `TASK FLOW`, where `Enter` starts an implementation
+task rather than sending a message: it reviews a Codex-only writer grant, `G`
+then grants the lease and starts the turn, and a completed build opens a separate
+Claude challenge confirmation. To send a prompt without granting write access —
+a question, a comparison, anything conversational — press `Option/Alt+D` for
+direct mode; `Ctrl+R` then selects Codex, Claude, or the explicit `BROADCAST`
+route.
 
 On normal and ultra-wide terminals, Claude remains above Codex in the left
 workspace and the read-only code/evidence inspector stays on the right. Lane
@@ -149,7 +152,7 @@ Every active shortcut is also discoverable in the TUI with `Ctrl+G`.
 
 | Area | Keys |
 |---|---|
-| Composer | `Enter` run/send · `Option/Alt+D` task flow/direct |
+| Composer | `Enter` run/send · `Option/Alt+D` task flow/direct · `G` grants the lease at a confirmation |
 | Prompt routing | Direct mode: `Ctrl+R` cycle `CODEX/CLAUDE/BROADCAST` |
 | View | `Option/Alt+0` both/focused · `Alt+1` focus Claude · `Alt+2` focus Codex |
 | Output | `PgUp/PgDn` scroll · `Home` oldest · `End` follow tail |

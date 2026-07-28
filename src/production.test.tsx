@@ -1377,7 +1377,7 @@ describe("layout safety and modal visibility", () => {
   test("no terminal size renders more rows or columns than the terminal has", () => {
     const { orchestrator } = setup();
     const snapshot = busySnapshot(orchestrator);
-    const overlays = [null, "help", "actions"] as const;
+    const overlays = [null, "help", "actions", "flow_start", "writer"] as const;
     const overflows: string[] = [];
     for (const columns of [40, 80, 140, 240]) {
       for (const rows of [8, 16, 19, 22, 45]) {
@@ -1484,7 +1484,50 @@ describe("layout safety and modal visibility", () => {
     );
     expect(output).toContain("unavailable: codex");
     expect(output).toContain("Codex cannot build while unavailable");
-    expect(output).not.toContain("Enter grant Codex lease and start");
+    expect(output).not.toContain("G grant Codex the writer lease");
+  });
+
+  test("the task-flow gate says why it opened and does not grant on a repeated Enter", () => {
+    const { orchestrator } = setup();
+    const base = orchestrator.getSnapshot();
+    // The composer starts in TASK FLOW, so this overlay is what someone who
+    // typed anything at all and pressed Enter sees first.
+    const review = renderToString(
+      <SplitlaneView snapshot={base} prompt="안녕~" columns={140} rows={40} overlay="flow_start" />,
+      { columns: 140 },
+    );
+    expect(review).toContain("why: the composer is in TASK FLOW");
+    expect(review).toContain("Option+D send as a direct prompt instead");
+    expect(review).toContain("Enter review the grant");
+
+    // Granting authority never shares a key with reaching the confirmation.
+    const confirm = renderToString(
+      <SplitlaneView snapshot={base} prompt="안녕~" columns={140} rows={40} overlay="flow_start" writerConfirm />,
+      { columns: 140 },
+    );
+    expect(confirm).toContain("G grant Codex the writer lease and start the turn");
+    expect(confirm).not.toContain("Enter grant");
+
+    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
+    const handler = source.slice(source.indexOf("useInput((input, key)"));
+    for (const overlay of ["flow_start", "writer"]) {
+      const start = handler.indexOf(`if (overlay === "${overlay}")`);
+      const branch = handler.slice(start, handler.indexOf("\n    }", start));
+      expect(branch).toContain('input.toLowerCase() === "g" && writerConfirm');
+      // `key.return` may only reach the confirmation, never past it.
+      expect(branch).not.toMatch(/else if \(key\.return\)\s*\{/);
+    }
+
+    // The explanation costs a row, and an overlay clips from the bottom — the
+    // action hint and the escape route must survive a short terminal.
+    for (const rows of [19, 22, 24]) {
+      const short = renderToString(
+        <SplitlaneView snapshot={base} prompt="안녕~" columns={80} rows={rows} overlay="flow_start" />,
+        { columns: 80 },
+      );
+      expect(short).toContain("Enter review the grant");
+      expect(short).toContain("Esc close");
+    }
   });
 
   test("an approval raised during dispatch survives the dispatch promise", () => {

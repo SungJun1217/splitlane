@@ -145,6 +145,10 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
     return (
       <Box borderStyle="double" borderColor={unavailable.includes("codex") ? "red" : "cyan"} flexDirection="column" paddingX={1}>
         <Text bold>TASK FLOW · CODEX BUILD → CLAUDE CHALLENGE · {writerConfirm ? "CONFIRM" : "REVIEW"}</Text>
+        {/* The composer starts in TASK FLOW, so this opens on the first Enter —
+            including for someone who only meant to say something. Say why it is
+            here before describing what it will do. */}
+        <Text wrap="truncate-end">why: the composer is in TASK FLOW, where Enter starts an implementation task instead of sending a message.</Text>
         <Text>task: {tailLines(taskPrompt, 3)}</Text>
         <Text wrap="truncate-end">workspace: {snapshot.git.root || "not a Git repository"}</Text>
         <Text wrap="truncate-end">current changes: {snapshot.git.dirty ? `${visibleDirtyFiles.join(", ")}${snapshot.git.files.length > 5 ? ` (+${snapshot.git.files.length - 5} more)` : ""}` : "clean"}</Text>
@@ -152,7 +156,7 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
         {unavailable.length ? <Text color="red">unavailable: {unavailable.join(" + ")} · run splitlane doctor · Ctrl+D shows the adapter error</Text> : null}
         <Text dimColor wrap="truncate-end">{unavailable.includes("codex")
           ? "Codex cannot build while unavailable · Esc close · Option+D uses direct mode"
-          : writerConfirm ? "Enter grant Codex lease and start · Esc close" : "Enter review final confirmation · Esc close · Option+D uses direct mode"}</Text>
+          : writerConfirm ? "G grant Codex the writer lease and start the turn · Esc cancel" : "Enter review the grant · Option+D send as a direct prompt instead · Esc cancel"}</Text>
       </Box>
     );
   }
@@ -199,7 +203,7 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
         <Text>root: {snapshot.git.root || "not a Git repository"}</Text>
         <Text>dirty: {snapshot.git.dirty ? `${visibleDirtyFiles.join(", ")}${remainingDirtyFiles > 0 ? ` (+${remainingDirtyFiles} more)` : ""}` : "clean"}</Text>
         <Text color="yellow">effect: workspace-write inside root · network off · peer remains read-only</Text>
-        <Text dimColor>{writerConfirm ? "Enter grant lease · Esc close" : "Tab writer · Enter review confirmation · Esc close"}</Text>
+        <Text dimColor>{writerConfirm ? "G grant the writer lease · Esc cancel" : "Tab writer · Enter review confirmation · Esc cancel"}</Text>
       </Box>
     );
   }
@@ -299,12 +303,12 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
     return (
       <Box borderStyle="double" borderColor="green" flexDirection="column" paddingX={1}>
         <Text bold>HELP · CURRENT ACTIONS ARE ALWAYS VISIBLE</Text>
-        <Text>Composer: Enter task flow · Option+D flow/direct</Text>
+        <Text>Composer: Enter task flow · Option+D flow/direct (direct sends a prompt without granting write access)</Text>
         <Text>Direct: Enter send · Ctrl+R route Codex/Claude/Broadcast</Text>
         <Text>View: Option+0 both/focused · Option+1/2 focus only (send route unchanged)</Text>
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
         <Text>Evidence: Option+I inspector · Tab focus · [/] tabs · ↑/↓ file · Ctrl+E recheck tree · Ctrl+T activity</Text>
-        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review (Option+T two lenses) · Ctrl+F findings · Option+H handoff · Ctrl+L isolated</Text>
+        <Text>Workflow: Ctrl+B build then G to grant · Ctrl+W revoke · Ctrl+V review (Option+T two lenses) · Ctrl+F findings · Option+H handoff · Ctrl+L isolated</Text>
         <Text>Controls: Ctrl+A approvals · Ctrl+K queue · Option+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+D diagnostics · Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text>Meta session: provider-only turns sync lazily; parallel peer results arrive next ordinary turn</Text>
@@ -489,7 +493,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
   const writerLabel = snapshot.mode === "isolated" ? "EACH LANE" : snapshot.writer?.toUpperCase() ?? "NONE";
   const pausedWriter = snapshot.mode === "review" && snapshot.review ? ` · paused ${snapshot.review.writer === "claude" ? "C" : "X"}` : "";
   const footer = composerMode === "flow"
-    ? "Enter flow · ⌥D direct · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit"
+    ? "Enter build task · ⌥D direct prompt · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit"
     : "Enter send · ^R route · ⌥D flow · ⌥0 view · ⌥1/2 lane · ^G help · ^Q quit";
   const laneInnerWidth = Math.max(10, (layout === "focused" ? columns : widths.lanes) - 4);
   const requiredRows = minimumRows(Math.max(columns, MIN_COLUMNS), viewMode, Boolean(snapshot.notice));
@@ -707,7 +711,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
         setOverlay(null);
         setWriterConfirm(false);
       } else if (key.return && !writerConfirm) setWriterConfirm(true);
-      else if (key.return) {
+      // The last step grants write authority and starts a paid turn, so it does
+      // not share a key with the step before it. Three identical presses used to
+      // take a typed line all the way from the composer to a granted lease.
+      else if (input.toLowerCase() === "g" && writerConfirm) {
         void orchestrator.startGuidedBuild(prompt, snapshot.git.dirty).then((started) => {
           if (started) {
             setPrompt("");
@@ -798,7 +805,9 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     if (overlay === "writer") {
       if (key.tab && !writerConfirm) setWriterProvider((provider) => provider === "claude" ? "codex" : "claude");
       else if (key.return && !writerConfirm) setWriterConfirm(true);
-      else if (key.return) {
+      // Granting write authority does not share a key with reaching the
+      // confirmation, for the same reason as the task-flow gate.
+      else if (input.toLowerCase() === "g" && writerConfirm) {
         void orchestrator.promoteWriter(writerProvider, snapshot.git.dirty).then((promoted) => {
           if (promoted) {
             closeOverlayIfStill("writer");
