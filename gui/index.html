@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Nothing is loaded from anywhere but this bundle: no CDN, no font host,
+         no network at all. The mirror is a local view of local state. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>Splitlane · read-only mirror</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="renderer.js"></script>
+  </body>
+</html>

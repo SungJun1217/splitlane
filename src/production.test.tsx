@@ -1,6 +1,7 @@
 import React from "react";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -54,6 +55,8 @@ import { SessionStore, projectIdentity } from "./session/store.ts";
 import { formatDoctor, runDoctor } from "./compat/doctor.ts";
 import { SharedMetaSession } from "./meta/session.ts";
 import { WorktreeManager } from "./worktree/manager.ts";
+import { MirrorPublisher } from "./mirror/publisher.ts";
+import { decodeFrames, encodeFrame, MIRROR_PROTOCOL, mirrorEndpoint, type MirrorFrame } from "./mirror/protocol.ts";
 
 /** `renderToString` emits SGR codes whenever colour is enabled, and they land in
  * the middle of phrases like `writer NONE`. Assertions about wording strip them
@@ -2799,5 +2802,131 @@ describe("captured provider event compatibility", () => {
     expect(await adapter.probe()).toMatchObject({ available: true, version: "codex-cli 0.145.0" });
     expect(adapter.reviewMechanisms).toEqual(["codex_native", "codex_generic"]);
     await adapter.close();
+  });
+});
+
+describe("read-only desktop mirror", () => {
+  async function attach(endpoint: string): Promise<{ frames: MirrorFrame[]; socket: Socket; waitForFrames: (count: number) => Promise<void> }> {
+    const socket = connect(endpoint);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+    const frames: MirrorFrame[] = [];
+    let buffered = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      const decoded = decodeFrames(buffered + chunk);
+      buffered = decoded.rest;
+      frames.push(...decoded.frames);
+    });
+    return {
+      frames,
+      socket,
+      waitForFrames: (count) => waitFor(() => frames.length >= count).then(() => undefined),
+    };
+  }
+
+  async function publisherFixture() {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "splitlane-mirror-"));
+    const { orchestrator } = setup();
+    const publisher = await MirrorPublisher.start({
+      source: orchestrator,
+      projectRoot: process.cwd(),
+      stateDirectory,
+      version: "0.0.0-test",
+    });
+    return { stateDirectory, orchestrator, publisher };
+  }
+
+  test("publishes the session snapshot to a local reader and keeps the endpoint private", async () => {
+    const { stateDirectory, orchestrator, publisher } = await publisherFixture();
+    try {
+      expect(publisher.endpoint).toBe(mirrorEndpoint(stateDirectory, process.cwd(), "darwin"));
+      // Owner-only: the snapshot names the project, its changed files, and every
+      // pending approval, so another local account must not be able to read it.
+      expect(statSync(publisher.endpoint).mode & 0o777).toBe(0o600);
+
+      const reader = await attach(publisher.endpoint);
+      await reader.waitForFrames(2);
+      const hello = reader.frames[0];
+      expect(hello).toMatchObject({
+        type: "hello",
+        protocol: MIRROR_PROTOCOL,
+        version: "0.0.0-test",
+        projectRoot: process.cwd(),
+        readOnly: true,
+      });
+      expect(reader.frames[1]).toMatchObject({ type: "snapshot" });
+      expect((reader.frames[1] as { snapshot: AppSnapshot }).snapshot.mode).toBe("compare");
+
+      // A later state change reaches an attached reader without it asking.
+      orchestrator.showNotice("한글 알림");
+      await reader.waitForFrames(3);
+      expect((reader.frames.at(-1) as { snapshot: AppSnapshot }).snapshot.notice).toBe("한글 알림");
+      reader.socket.destroy();
+    } finally {
+      await publisher.close();
+      await orchestrator.close();
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("a reader that tries to send anything is disconnected", async () => {
+    const { stateDirectory, orchestrator, publisher } = await publisherFixture();
+    try {
+      const reader = await attach(publisher.endpoint);
+      await reader.waitForFrames(2);
+      // The mirror carries no authority, and the protocol has no reader-to-owner
+      // frame. Enforcing that in the transport is stronger than trusting every
+      // future renderer not to invent one.
+      reader.socket.write(JSON.stringify({ type: "promoteWriter", provider: "codex" }));
+      await waitFor(() => reader.socket.destroyed);
+      expect(reader.socket.destroyed).toBe(true);
+
+      // The rejected reader must not take the session or the publisher with it.
+      const second = await attach(publisher.endpoint);
+      await second.waitForFrames(2);
+      expect(second.frames[0]).toMatchObject({ type: "hello", readOnly: true });
+      second.socket.destroy();
+    } finally {
+      await publisher.close();
+      await orchestrator.close();
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("closing the session removes the endpoint instead of leaving a dead socket", async () => {
+    const { stateDirectory, orchestrator, publisher } = await publisherFixture();
+    try {
+      const reader = await attach(publisher.endpoint);
+      await reader.waitForFrames(2);
+      await publisher.close();
+      expect(existsSync(publisher.endpoint)).toBe(false);
+      await waitFor(() => reader.socket.destroyed);
+      // Publishing stops with the session: a snapshot raised after close must not
+      // reach anyone.
+      const delivered = reader.frames.length;
+      orchestrator.showNotice("after close");
+      await Bun.sleep(20);
+      expect(reader.frames).toHaveLength(delivered);
+      await expect(attach(publisher.endpoint)).rejects.toThrow();
+    } finally {
+      await orchestrator.close();
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("a partial frame is buffered until the newline arrives and unknown frames are ignored", () => {
+    const snapshot = setup().orchestrator.getSnapshot();
+    const encoded = encodeFrame({ type: "snapshot", snapshot });
+    const split = Math.floor(encoded.length / 2);
+    const first = decodeFrames(encoded.slice(0, split));
+    expect(first.frames).toEqual([]);
+    const second = decodeFrames(first.rest + encoded.slice(split));
+    expect(second.frames).toHaveLength(1);
+    expect(second.rest).toBe("");
+    // A reader must survive a frame type it does not know and a truncated line.
+    expect(decodeFrames('{"type":"future"}\n{ not json\n').frames).toEqual([]);
   });
 });

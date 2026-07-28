@@ -11,15 +11,18 @@
     "dev": "bun run bin/splitlane.tsx",
     "build": "bun build ./bin/splitlane.tsx --target=bun --outdir=dist",
     "build:compile": "bun build ./bin/splitlane.tsx --compile --outfile=dist/splitlane",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.gui.json",
     "probe": "node spike/probe.mjs",
     "probe:live:claude": "node spike/live-claude.mjs --i-understand-this-starts-model-turns",
     "probe:live:codex": "node spike/live-codex.mjs --i-understand-this-starts-model-turns",
     "probe:live:claude-sdk": "node spike/live-claude-sdk.mjs --i-understand-this-starts-model-turns",
     "verify:live:m1": "bun run spike/live-m1-compare.ts --i-understand-this-starts-20-model-turns",
-    "test": "node --test test/*.test.mjs && bun test src",
+    "test": "node --test test/*.test.mjs && bun test src && bun test gui",
     "test:spike": "node --test test/*.test.mjs",
-    "test:production": "bun test src"
+    "test:production": "bun test src",
+    "test:gui": "bun test gui",
+    "gui:build": "bun build gui/main.ts --target=node --format=cjs --external electron --outfile=dist/gui/main.cjs && bun build gui/preload.ts --target=node --format=cjs --external electron --outfile=dist/gui/preload.cjs && bun build gui/renderer.tsx --target=browser --outfile=dist/gui/renderer.js && cp gui/index.html dist/gui/index.html",
+    "gui:dev": "bun run gui:build && electron dist/gui/main.cjs"
   },
   "engines": {
     "node": ">=22"
@@ -29,11 +32,14 @@
     "ink": "7.1.1",
     "react": "19.2.0",
     "react-devtools-core": "^6.1.5",
+    "react-dom": "19.2.0",
     "string-width": "8.2.0"
   },
   "devDependencies": {
     "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.3",
     "bun-types": "1.3.14",
+    "electron": "^43.2.0",
     "typescript": "5.9.3"
   }
 }
