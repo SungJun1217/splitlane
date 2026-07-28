@@ -52,6 +52,13 @@ export class CodexRpcClient {
       child.once("spawn", resolve);
       child.once("error", reject);
     });
+    // An app-server that dies with a write in flight raises EPIPE on stdin.
+    // Without a listener that is an unhandled 'error' event, which would take
+    // the whole TUI — and the other lane — down with it. The exit handler below
+    // is what actually reports the failure.
+    child.stdin.on("error", (error: Error) => {
+      this.#stderr = (this.#stderr + sanitizeTerminalText(`\n[stdin] ${error.message}\n`)).slice(-64_000);
+    });
     this.#lines = readline.createInterface({ input: child.stdout });
     this.#lines.on("line", (line) => this.#handleLine(line));
     child.stderr.on("data", (chunk: Buffer) => {
@@ -113,11 +120,18 @@ export class CodexRpcClient {
   }
 
   notify(method: string, params: Record<string, unknown> = {}): void {
-    this.#child?.stdin.write(`${JSON.stringify({ method, params })}\n`);
+    this.#write(method, { method, params });
   }
 
   respond(id: number | string, result: Record<string, unknown>): void {
-    this.#child?.stdin.write(`${JSON.stringify({ id, result })}\n`);
+    this.#write("response", { id, result });
+  }
+
+  #write(label: string, message: Record<string, unknown>): void {
+    this.#child?.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+      if (!error) return;
+      this.#stderr = (this.#stderr + sanitizeTerminalText(`\n[stdin] unable to write ${label}: ${error.message}\n`)).slice(-64_000);
+    });
   }
 
   async close(): Promise<void> {

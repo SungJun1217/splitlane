@@ -54,7 +54,7 @@ import { formatDoctor, runDoctor } from "./compat/doctor.ts";
 import { SharedMetaSession } from "./meta/session.ts";
 import { WorktreeManager } from "./worktree/manager.ts";
 
-type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed";
+type Scenario = "complete" | "fail" | "hold" | "activity" | "activity_burst" | "approval" | "double_approval" | "network_approval" | "outside_approval" | "unknown_file_approval" | "review_findings" | "review_delayed" | "wedged_start" | "slow_start";
 
 class FakeAdapter implements ProviderAdapter {
   readonly sessions: SessionOptions[] = [];
@@ -81,6 +81,8 @@ class FakeAdapter implements ProviderAdapter {
 
   async startSession(options: SessionOptions): Promise<SessionHandle> {
     this.sessions.push(options);
+    if (this.scenario === "wedged_start") await new Promise<never>(() => {});
+    if (this.scenario === "slow_start") await Bun.sleep(60);
     return {
       provider: this.provider,
       id: this.sessions.length === 1 ? `${this.provider}-session` : `${this.provider}-session-${this.sessions.length}`,
@@ -549,6 +551,35 @@ describe("production orchestrator", () => {
     await orchestrator.close();
   });
 
+  test("a lane wedged in startup can be abandoned instead of pinning the workflow", async () => {
+    const { orchestrator } = setup("wedged_start", "complete");
+    await orchestrator.initialize();
+    orchestrator.setTarget("claude");
+    void orchestrator.dispatch("startup never answers");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "STARTING");
+    await orchestrator.cancel("claude");
+    expect(orchestrator.getSnapshot().lanes.claude.status).toBe("CANCELLED");
+    expect(orchestrator.getSnapshot().notice).toContain("abandoned during startup");
+    orchestrator.setTarget("codex");
+    expect(await orchestrator.dispatch("peer is unaffected")).toBe(true);
+    await waitFor(() => orchestrator.getSnapshot().lanes.codex.status === "COMPLETED");
+    await orchestrator.close();
+  });
+
+  test("an abandoned startup cannot resurrect its lane when the provider finally answers", async () => {
+    const { orchestrator } = setup("slow_start", "complete");
+    await orchestrator.initialize();
+    orchestrator.setTarget("claude");
+    void orchestrator.dispatch("startup answers too late");
+    await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "STARTING");
+    await orchestrator.cancel("claude");
+    await Bun.sleep(150);
+    expect(orchestrator.getSnapshot().lanes.claude.status).toBe("CANCELLED");
+    expect(orchestrator.getSnapshot().lanes.claude.sessionId).toBeNull();
+    expect(orchestrator.getSnapshot().lanes.claude.turnId).toBeNull();
+    await orchestrator.close();
+  });
+
   test("revoking an active writer cancels only that lane and restores compare", async () => {
     const { orchestrator, claude, codex } = setup("hold", "hold");
     await orchestrator.initialize();
@@ -871,6 +902,7 @@ describe("configuration", () => {
     expect(() => parseConfig({ version: 1, workspace: { mode: "build" } }, "project.json")).toThrow("project.json.workspace is unknown");
     expect(() => parseConfig({ version: 1, queue: { limit: 11 } }, "project.json")).toThrow("project.json.queue.limit");
     expect(() => parseConfig({ version: 1, providers: { claude: { model: "bad\nmodel" } } }, "project.json")).toThrow("unsafe control character");
+    expect(() => parseConfig({ version: 1, providers: { claude: { model: "sonnet[31m" } } }, "project.json")).toThrow("unsafe control character");
     expect(() => parseConfig({ version: 2 }, "project.json")).toThrow("project.json.version must be 1");
     expect(() => parseConfig({ version: 1, updates: { mode: "sometimes" } }, "user.json")).toThrow("user.json.updates.mode");
     expect(configPaths("/repo", { platform: "darwin", home: "/Users/test", env: {} }).user).toBe("/Users/test/Library/Application Support/Splitlane/config.json");
@@ -947,6 +979,10 @@ describe("terminal rendering", () => {
   test("sanitizes terminal escape injection and bounds output", () => {
     expect(sanitizeTerminalText("ok\u001b]2;owned\u0007\u001b[31m!\u001b[0m")).toBe("ok!");
     expect(appendBounded("1234", "56", 4)).toBe("3456");
+    // A bare carriage return would let provider text overwrite the line
+    // already on screen and claim a decision that was never made.
+    expect(sanitizeTerminalText("denied\rapproved")).toBe("denied\napproved");
+    expect(sanitizeTerminalText("line\r\nnext")).toBe("line\nnext");
   });
 
   test("selects responsive layouts and handles graphemes", () => {
@@ -1209,7 +1245,24 @@ describe("terminal rendering", () => {
       { columns: 120 },
     );
     expect(approval).toContain("APPROVAL INBOX · 1 PENDING");
-    expect(approval).toContain("A allow once · D deny · X cancel turn");
+    expect(approval).toContain("A allow once (confirms) · D deny · X cancel turn");
+
+    // Granting authority is the only decision here that is not fail-closed, so
+    // the armed state has to say plainly that a second press commits it.
+    const armed = renderToString(
+      <SplitlaneView snapshot={approvalSnapshot} prompt="" columns={120} rows={30} overlay="approval" approvalArmed />,
+      { columns: 120 },
+    );
+    expect(armed).toContain("Press A again to allow this request once");
+    expect(armed).not.toContain("A allow once (confirms)");
+
+    // A modal that is not the inbox still has to say an approval is waiting,
+    // because the inbox no longer steals input from whatever owns it.
+    const busy = renderToString(
+      <SplitlaneView snapshot={approvalSnapshot} prompt="" columns={120} rows={30} overlay="configuration" />,
+      { columns: 120 },
+    );
+    expect(busy).toContain("1 approval(s) waiting on ^A");
   });
 
   test("renders review confirmation and stale Korean findings in a narrow terminal", () => {
@@ -1275,6 +1328,7 @@ describe("terminal rendering", () => {
       { columns: 90 },
     );
     expect(confirmation).toContain("REVOKE WRITER THEN READ ONLY");
+    expect(confirmation).toContain("Option+T two lenses");
     expect(confirmation).toContain("회귀 없음");
     expect(confirmation).toContain("codex_generic [stable]");
     const findings = renderToString(
@@ -1549,6 +1603,23 @@ describe("layout safety and modal visibility", () => {
     for (const key of bound) expect(readme).toContain(`Ctrl+${key}`);
   });
 
+  test("an overlay that accepts typing never binds a bare letter to an action", () => {
+    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
+    const handler = source.slice(source.indexOf("useInput((input, key)"));
+    for (const overlay of ["review", "model"]) {
+      const start = handler.indexOf(`if (overlay === "${overlay}")`);
+      expect(start).toBeGreaterThan(-1);
+      const branch = handler.slice(start, handler.indexOf("\n    }", start));
+      expect(branch).toContain(overlay === "review" ? "setReviewCriteria" : "setModelDraft");
+      // A bare letter comparison is reached before the text-append branch, so
+      // that letter becomes impossible to type into the field — and here it
+      // would fire a destructive action mid-word.
+      const offenders = branch.split("\n").filter((line) =>
+        line.includes("input.toLowerCase() ===") && !line.includes("key.meta") && !line.includes("key.ctrl"));
+      expect(offenders).toEqual([]);
+    }
+  });
+
   test("doctor separates a missing project path from an unreadable repository", async () => {
     const fixture = join(process.cwd(), "test", "fixtures", "fake-doctor-provider.mjs");
     const providers = {
@@ -1586,6 +1657,46 @@ describe("M2 workspace guard", () => {
       expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
       await orchestrator.close();
     } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a cancelled writer turn keeps its edits attributed when the lease is granted again", async () => {
+    const root = await mkdtemp(join(tmpdir(), "splitlane-m2-baseline-"));
+    const claude = new FakeAdapter("claude", "hold");
+    const orchestrator = new CompareOrchestrator(root, { claude, codex: new FakeAdapter("codex") });
+    try {
+      await gitCommand(root, "init", "-q");
+      await gitCommand(root, "config", "user.email", "test@example.invalid");
+      await gitCommand(root, "config", "user.name", "Splitlane Test");
+      await Bun.write(join(root, "existing.txt"), "committed\n");
+      await gitCommand(root, "add", "existing.txt");
+      await gitCommand(root, "commit", "-qm", "baseline");
+
+      await orchestrator.initialize();
+      expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+      const firstBaseline = orchestrator.getSnapshot().git.baselineFingerprint;
+      expect(firstBaseline).not.toBeNull();
+
+      orchestrator.setTarget("claude");
+      await orchestrator.dispatch("edit then get cancelled");
+      await waitFor(() => orchestrator.getSnapshot().lanes.claude.status === "RUNNING");
+      await Bun.write(join(root, "writer.txt"), "partial work\n");
+      await orchestrator.cancel("claude");
+      await waitFor(() => orchestrator.getSnapshot().mode === "compare");
+
+      // The lease is gone — that stays fail-closed — but the baseline is not, so
+      // re-promoting must not silently re-label the writer's partial work as
+      // pre-existing and drop it out of the review diff.
+      expect(orchestrator.getSnapshot().writer).toBeNull();
+      expect(orchestrator.getSnapshot().git.baselineFingerprint).toBe(firstBaseline);
+      expect(await orchestrator.promoteWriter("claude", true)).toBe(true);
+      expect(orchestrator.getSnapshot().git.baselineFingerprint).toBe(firstBaseline);
+      expect(orchestrator.getSnapshot().notice).toContain("retained baseline");
+      await orchestrator.refreshEvidence();
+      expect(orchestrator.getSnapshot().git.evidence).not.toContainEqual({ path: "writer.txt", classification: "pre-existing" });
+    } finally {
+      await orchestrator.close();
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -1771,6 +1882,63 @@ describe("isolated worktree lifecycle", () => {
       expect(await recovered.cleanupIsolated()).toBe(true);
       await recovered.close();
     } finally {
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("a dirty run that cleanup must refuse can still stop blocking isolated mode", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      expect(await orchestrator.startIsolated()).toBe(true);
+      const active = orchestrator.getSnapshot().isolated!;
+      const dirtyFile = join(active.lanes.claude.path, "uncommitted.txt");
+      await Bun.write(dirtyFile, "must survive\n");
+      expect(await orchestrator.cleanupIsolated()).toBe(false);
+      // Cleanup can never succeed while that file is there, and a tracked run
+      // blocks every new one, so discarding is the only way out short of
+      // deleting state by hand.
+      expect(await orchestrator.prepareIsolated()).toBe(false);
+
+      expect(await orchestrator.discardIsolated()).toBe(true);
+      expect(orchestrator.getSnapshot().isolated).toBeNull();
+      expect(orchestrator.getSnapshot().mode).toBe("compare");
+      const notice = orchestrator.getSnapshot().notice ?? "";
+      expect(notice).toContain("Nothing was deleted");
+      expect(notice).toContain(active.lanes.claude.branch);
+      // Discarding tracking must never destroy the work it exists to rescue.
+      expect(await Bun.file(dirtyFile).text()).toBe("must survive\n");
+      expect((await gitResult(root, "show-ref", "--verify", `refs/heads/${active.lanes.claude.branch}`)).exitCode).toBe(0);
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+    } finally {
+      await orchestrator.close();
+      await rm(outer, { recursive: true, force: true });
+    }
+  });
+
+  test("a half-created run is cleanable because a missing worktree is not an error", async () => {
+    const { outer, root, config } = await isolatedRepository();
+    const orchestrator = new CompareOrchestrator(root, { claude: new FakeAdapter("claude"), codex: new FakeAdapter("codex") }, config);
+    try {
+      await orchestrator.initialize();
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+      expect(await orchestrator.startIsolated()).toBe(true);
+      const active = orchestrator.getSnapshot().isolated!;
+      // Stand in for a creation that failed after the first worktree, or a
+      // directory the user removed by hand: git status there cannot be read.
+      await rm(active.lanes.codex.path, { recursive: true, force: true });
+      await orchestrator.refreshIsolated();
+      expect(orchestrator.getSnapshot().isolated?.lanes.codex.present).toBe(false);
+      expect(orchestrator.getSnapshot().isolated?.lanes.codex.error).toBeNull();
+      expect(await orchestrator.cleanupIsolated()).toBe(true);
+      expect(orchestrator.getSnapshot().isolated?.lifecycle).toBe("cleaned");
+      expect(await Bun.file(join(active.lanes.claude.path, ".git")).exists()).toBe(false);
+      expect((await gitResult(root, "show-ref", "--verify", `refs/heads/${active.lanes.codex.branch}`)).exitCode).toBe(0);
+      expect(await orchestrator.prepareIsolated()).toBe(true);
+    } finally {
+      await orchestrator.close();
       await rm(outer, { recursive: true, force: true });
     }
   });

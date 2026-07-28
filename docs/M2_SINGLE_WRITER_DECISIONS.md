@@ -46,6 +46,19 @@ features.
   files are recorded separately from files changed after the lease was granted.
 - Approval, cancellation, adapter failure, transport exit, and application exit
   all fail closed. No lease or approval cache is restored on restart.
+- The Git baseline belongs to the build cycle, not to the lease. Revoking a lease
+  — including the automatic revocation after a cancelled or failed writer turn —
+  surrenders write authority but keeps the baseline, and re-promoting a writer
+  reuses it instead of capturing a new one. Capturing a fresh baseline on every
+  promotion silently re-classified the edits the earlier turn had already made as
+  `pre-existing`, so they dropped out of the review diff and the user could not
+  cancel and re-prompt a writer within one build session without losing evidence.
+  The baseline is cleared only where the cycle genuinely ends: review accepted or
+  exited, and entering isolated mode (where a primary-tree baseline can no longer
+  describe anything). Returning findings keeps it, because the fix round is a
+  continuation of the same work and the follow-up review must still cover all of
+  it. Decided 2026-07-28 in response to the review of this behavior; the
+  fail-closed lease rules above are unchanged.
 
 ### 3. Approval inbox
 

@@ -353,6 +353,10 @@ export interface IsolatedLaneWorkspace {
   processState: "idle" | "running";
   dirty: boolean;
   head: string;
+  /** False when the worktree directory does not exist — it was never created, or
+   * it was removed outside Splitlane. Distinct from `error`, which means the
+   * directory is there but could not be read. */
+  present: boolean;
   error: string | null;
 }
 

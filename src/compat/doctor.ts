@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand, type CommandResult } from "../process/child.ts";
@@ -238,7 +238,14 @@ async function doctorWorkspace(projectRoot: string): Promise<DoctorReport["works
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
   });
   const resolvedTop = top.exitCode === 0 ? sanitizeTerminalText(top.stdout).trim() : "";
-  const rootMatches = resolvedTop === projectRoot;
+  // `git rev-parse --show-toplevel` reports the physical path, so a repository
+  // reached through a symlink (/tmp on macOS, a symlinked projects directory)
+  // would never string-compare equal to the path the user actually passed.
+  const physical = async (path: string) => realpath(path).catch(() => path);
+  const rootMatches = resolvedTop !== "" && (
+    resolvedTop === projectRoot ||
+    await physical(resolvedTop) === await physical(projectRoot)
+  );
   const checks = [
     check(
       "git_root",

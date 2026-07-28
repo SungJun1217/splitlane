@@ -11,6 +11,7 @@ type ComposerMode = "flow" | "direct";
 type InspectorTab = "changes" | "diff" | "file" | "findings";
 const INSPECTOR_TABS: readonly InspectorTab[] = ["changes", "diff", "file", "findings"];
 const FINDINGS_WINDOW = 6;
+const QUEUE_WINDOW = 8;
 const NOTICE_TTL_MS = 12_000;
 
 /** A dispatch can raise an approval before its own promise resolves. Closing
@@ -117,7 +118,7 @@ function Inspector({ snapshot, height, width, tab, focused, evidenceIndex }: { s
   );
 }
 
-function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex, restoreInspect, destructiveConfirm }: {
+function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft, roleIndex, writerProvider, writerConfirm, approvalIndex, approvalArmed, reviewCriteria, findingIndex, staleAcknowledged, activityIndex, activityExpanded, queueIndex, restoreInspect, destructiveConfirm, isolatedDiscardConfirm }: {
   overlay: Exclude<Overlay, null>;
   snapshot: AppSnapshot;
   taskPrompt: string;
@@ -127,6 +128,7 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
   writerProvider: ProviderId;
   writerConfirm: boolean;
   approvalIndex: number;
+  approvalArmed: boolean;
   reviewCriteria: string;
   findingIndex: number;
   staleAcknowledged: boolean;
@@ -135,6 +137,7 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
   queueIndex: number;
   restoreInspect: boolean;
   destructiveConfirm: boolean;
+  isolatedDiscardConfirm: boolean;
 }) {
   if (overlay === "flow_start") {
     const visibleDirtyFiles = snapshot.git.files.slice(0, 5);
@@ -215,7 +218,9 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
             <Text>reason: {approval.reason ?? "not provided"}</Text>
             <Text color={approval.outsideWorkspace ? "red" : "gray"}>boundary: {approval.outsideWorkspace ? "OUTSIDE WORKSPACE" : "inside/unknown"} · network {approval.networkEffect}</Text>
             <Text color="yellow">effect: one temporary decision · no persistent rule · no permission bypass</Text>
-            <Text dimColor>↑/↓ request · A allow once · D deny · X cancel turn · Esc close</Text>
+            {approvalArmed
+              ? <Text color="red">Press A again to allow this request once · D deny · X cancel turn · Esc close</Text>
+              : <Text dimColor>↑/↓ request · A allow once (confirms) · D deny · X cancel turn · Esc close</Text>}
           </>
         ) : <Text>No pending approvals. Esc close.</Text>}
       </Box>
@@ -235,7 +240,7 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
         <Text>objective: {tailLines(review.envelope.objective, 2)}</Text>
         <Text>acceptance criteria: <Text color="cyan">{reviewCriteria || " "}</Text></Text>
         <Text color="yellow">Enter revokes the writer lease before dispatch. Network and writes stay off.</Text>
-        <Text dimColor>Type criteria · Tab mechanism · Enter single lens · T two lenses · Esc keep build</Text>
+        <Text dimColor>Type criteria · Tab mechanism · Enter single lens · Option+T two lenses · Esc keep build</Text>
       </Box>
     );
   }
@@ -298,8 +303,8 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
         <Text>Direct: Enter send · Ctrl+R route Codex/Claude/Broadcast</Text>
         <Text>View: Option+0 both/focused · Option+1/2 focus only (send route unchanged)</Text>
         <Text>Lane: PgUp/PgDn scroll · Home oldest · End follow tail · Ctrl+X cancel</Text>
-        <Text>Evidence: Option+I inspector · Tab focus · [/] tabs · ↑/↓ file · Ctrl+T activity</Text>
-        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review · Ctrl+F findings · Option+H handoff · Ctrl+L isolated</Text>
+        <Text>Evidence: Option+I inspector · Tab focus · [/] tabs · ↑/↓ file · Ctrl+E recheck tree · Ctrl+T activity</Text>
+        <Text>Workflow: Ctrl+B build · Ctrl+W revoke · Ctrl+V review (Option+T two lenses) · Ctrl+F findings · Option+H handoff · Ctrl+L isolated</Text>
         <Text>Controls: Ctrl+A approvals · Ctrl+K queue · Option+M models · Ctrl+O roles · Ctrl+P capabilities · Ctrl+U config</Text>
         <Text>Lifecycle: Ctrl+D diagnostics · Ctrl+N reset focused session · Ctrl+Q close and exit · Esc closes modal</Text>
         <Text>Meta session: provider-only turns sync lazily; parallel peer results arrive next ordinary turn</Text>
@@ -324,15 +329,23 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
     );
   }
   if (overlay === "queue") {
-    const item = snapshot.queue[queueIndex] ?? snapshot.queue[0];
+    const index = Math.min(queueIndex, Math.max(0, snapshot.queue.length - 1));
+    const item = snapshot.queue[index] ?? snapshot.queue[0];
+    // Without a window the selection disappears past the eighth entry while
+    // D and C keep acting on it.
+    const start = Math.max(0, Math.min(index - 2, Math.max(0, snapshot.queue.length - QUEUE_WINDOW)));
     return (
       <Box borderStyle="double" borderColor="cyan" flexDirection="column" paddingX={1}>
         <Text bold>REQUEST QUEUE · {snapshot.queue.length} GROUP(S) · LIMIT {snapshot.queueLimit}/LANE</Text>
-        {snapshot.queue.length ? snapshot.queue.slice(0, 8).map((candidate, index) => <Text key={candidate.id} color={index === queueIndex ? "cyan" : candidate.status === "needs_confirmation" ? "yellow" : "white"}>
-          {index === queueIndex ? ">" : " "} {candidate.id.slice(0, 8)} · {candidate.target} · {candidate.status} · {candidate.envelope.prompt.slice(0, 48)}
-        </Text>) : <Text>Queue is empty.</Text>}
+        {snapshot.queue.length ? snapshot.queue.slice(start, start + QUEUE_WINDOW).map((candidate, offset) => {
+          const position = start + offset;
+          return <Text key={candidate.id} wrap="truncate-end" color={position === index ? "cyan" : candidate.status === "needs_confirmation" ? "yellow" : "white"}>
+            {position === index ? ">" : " "} {candidate.id.slice(0, 8)} · {candidate.target} · {candidate.status} · {candidate.envelope.prompt.slice(0, 48)}
+          </Text>;
+        }) : <Text>Queue is empty.</Text>}
+        {snapshot.queue.length > QUEUE_WINDOW ? <Text dimColor>showing {start + 1}–{Math.min(snapshot.queue.length, start + QUEUE_WINDOW)} of {snapshot.queue.length}</Text> : null}
         {item ? <Text dimColor>frozen: {item.mode}/{item.writer ?? "none"} · C {item.models.claude} · X {item.models.codex}</Text> : null}
-        <Text dimColor>↑/↓ select · D remove · C confirm changed authority · Ctrl+K/Esc close</Text>
+        <Text dimColor>↑/↓ select · D remove selected · C confirm changed authority · Ctrl+K/Esc close</Text>
       </Box>
     );
   }
@@ -403,10 +416,12 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
           <Text>primary: {run.primaryRoot} · observational only</Text>
           {(["claude", "codex"] as const).map((provider) => {
             const lane = run.lanes[provider];
-            return <Text key={provider}>{provider.toUpperCase()}: {lane.processState.toUpperCase()} · {lane.dirty ? "DIRTY" : "CLEAN"} · {lane.branch}{"\n"}  {lane.path}{lane.error ? ` · ${lane.error}` : ""}</Text>;
+            const state = run.lifecycle === "preview" ? "PLANNED" : lane.present ? lane.dirty ? "DIRTY" : "CLEAN" : "NO DIRECTORY";
+            return <Text key={provider}>{provider.toUpperCase()}: {lane.processState.toUpperCase()} · {state} · {lane.branch}{"\n"}  {lane.path}{lane.error ? ` · ${lane.error}` : ""}</Text>;
           })}
           {run.lifecycle === "preview" ? <Text color="yellow">Enter create both branches/worktrees · X/Esc discard preview</Text> : null}
           {run.lifecycle !== "preview" && run.lifecycle !== "cleaned" ? <Text color="yellow">{destructiveConfirm ? "Press C again to remove only clean, idle, integrated worktree directories." : "R inspect · K retain · C review clean-only cleanup (branches remain)"}</Text> : null}
+          {run.lifecycle !== "preview" && run.lifecycle !== "cleaned" ? <Text dimColor>{isolatedDiscardConfirm ? "Press D again to stop tracking this run · nothing on disk is deleted" : "D stop tracking this run when cleanup cannot succeed (deletes nothing)"}</Text> : null}
           {run.lifecycle === "cleaned" ? <Text color="green">Worktree directories removed cleanly; branches remain for manual integration.</Text> : null}
           <Text dimColor>Inspect: git diff {run.baseCommit.slice(0, 12)}...{run.lanes.claude.branch}</Text>
           <Text dimColor>Inspect: git diff {run.baseCommit.slice(0, 12)}...{run.lanes.codex.branch}</Text>
@@ -428,7 +443,7 @@ function OverlayPanel({ overlay, snapshot, taskPrompt, modelProvider, modelDraft
   );
 }
 
-export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "both", composerMode = "flow", overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0, restoreInspect = false, destructiveConfirm = false, inspectorTab = "changes", inspectorFocused = false, evidenceIndex = 0 }: {
+export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "both", composerMode = "flow", overlay = null, modelProvider = "claude", modelDraft = "", roleIndex = 0, writerProvider = "claude", writerConfirm = false, approvalIndex = 0, approvalArmed = false, reviewCriteria = "", findingIndex = 0, staleAcknowledged = false, scrollOffsets = { claude: 0, codex: 0 }, activityIndex = 0, activityExpanded = false, queueIndex = 0, restoreInspect = false, destructiveConfirm = false, isolatedDiscardConfirm = false, inspectorTab = "changes", inspectorFocused = false, evidenceIndex = 0 }: {
   snapshot: AppSnapshot;
   prompt: string;
   columns: number;
@@ -442,6 +457,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
   writerProvider?: ProviderId;
   writerConfirm?: boolean;
   approvalIndex?: number;
+  approvalArmed?: boolean;
   reviewCriteria?: string;
   findingIndex?: number;
   staleAcknowledged?: boolean;
@@ -451,6 +467,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
   queueIndex?: number;
   restoreInspect?: boolean;
   destructiveConfirm?: boolean;
+  isolatedDiscardConfirm?: boolean;
   inspectorTab?: InspectorTab;
   inspectorFocused?: boolean;
   evidenceIndex?: number;
@@ -513,7 +530,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
           {provider === "claude" ? "C" : "X"} <Text color={statusColor(lane.status)}>[{lane.status}]</Text> {detail}
         </Text>;
       }) : null}
-      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} taskPrompt={prompt} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} /> : (
+      {overlay ? <OverlayPanel overlay={overlay} snapshot={snapshot} taskPrompt={prompt} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} approvalArmed={approvalArmed} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} isolatedDiscardConfirm={isolatedDiscardConfirm} /> : (
         <Box flexDirection={outerDirection} gap={1} height={heights.content} overflow="hidden">
           <Box flexDirection="column" width={layout === "focused" ? undefined : widths.lanes} flexGrow={heights.showInspector ? 2 : 1} gap={1}>
             {lanes.map((provider) => <Lane key={provider} lane={snapshot.lanes[provider]} meta={snapshot.metaSession} focused={snapshot.focusedProvider === provider} height={heights.lane} innerWidth={laneInnerWidth} scrollOffset={scrollOffsets[provider]} compact={compactBoth} />)}
@@ -523,7 +540,7 @@ export function SplitlaneView({ snapshot, prompt, columns, rows, viewMode = "bot
       )}
       {overlay ? <>
         {snapshot.notice ? <Text color="yellow" wrap="truncate-end">{snapshot.notice}</Text> : null}
-        <Text dimColor wrap="truncate-end">Modal open · follow the actions above · Esc close · ^Q quit</Text>
+        <Text dimColor wrap="truncate-end">Modal open · follow the actions above · Esc close · ^Q quit{overlay !== "approval" && snapshot.approvals.length ? ` · ${snapshot.approvals.length} approval(s) waiting on ^A` : ""}</Text>
       </> : <>
         <Box borderStyle="round" borderColor={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"} paddingX={1}>
           <Text bold color={composerMode === "flow" ? "cyan" : snapshot.target === "both" ? "yellow" : "blue"}> {composerLabel} </Text><Text wrap="truncate-start" dimColor={!prompt}>{prompt || (composerMode === "flow" ? "Describe the implementation task…" : "Type a direct prompt…")}</Text>
@@ -551,6 +568,8 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   const [writerProvider, setWriterProvider] = useState<ProviderId>(snapshot.focusedProvider);
   const [writerConfirm, setWriterConfirm] = useState(false);
   const [approvalIndex, setApprovalIndex] = useState(0);
+  const [armedApproval, setArmedApproval] = useState<string | null>(null);
+  const dismissedApprovalCount = useRef(0);
   const [reviewCriteria, setReviewCriteria] = useState("");
   const [findingIndex, setFindingIndex] = useState(0);
   const [staleAcknowledged, setStaleAcknowledged] = useState(false);
@@ -561,6 +580,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   const [queueIndex, setQueueIndex] = useState(0);
   const [restoreInspect, setRestoreInspect] = useState(false);
   const [destructiveConfirm, setDestructiveConfirm] = useState(false);
+  const [isolatedDiscardConfirm, setIsolatedDiscardConfirm] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("changes");
   const [inspectorFocused, setInspectorFocused] = useState(false);
   const [evidenceIndex, setEvidenceIndex] = useState(0);
@@ -585,12 +605,16 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     previousLineCounts.current = counts;
   }, [snapshot.lanes.claude.output, snapshot.lanes.codex.output]);
 
+  // An approval must never take input away from an overlay that already owns
+  // it: the draft would be lost and the single-key decisions would land under
+  // fingers that were typing something else. The inbox waits for input to be
+  // free instead, which is why `overlay` is a dependency here.
   useEffect(() => {
     if (snapshot.approvals.length > 0) {
       setApprovalIndex((index) => Math.min(index, snapshot.approvals.length - 1));
-      setOverlay("approval");
+      if (overlay === null && dismissedApprovalCount.current !== snapshot.approvals.length) setOverlay("approval");
     } else if (overlay === "approval") setOverlay(null);
-  }, [snapshot.approvals.length]);
+  }, [snapshot.approvals.length, overlay]);
 
   useEffect(() => {
     if (snapshot.queueOffer) setOverlay("queue_offer");
@@ -616,6 +640,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   }, [snapshot.git.files.join("\0")]);
 
   useEffect(() => {
+    setQueueIndex((index) => Math.min(index, Math.max(0, snapshot.queue.length - 1)));
+  }, [snapshot.queue.length]);
+
+  useEffect(() => {
     if (!snapshot.notice) return;
     const timer = setTimeout(() => orchestrator.clearNotice(), NOTICE_TTL_MS);
     return () => clearTimeout(timer);
@@ -637,6 +665,14 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   }, [guidedBuildActive, snapshot.lanes.codex.status, snapshot.mode, snapshot.writer]);
 
   const closeOverlayIfStill = (expected: Overlay) => setOverlay((current) => overlayAfterDispatch(current, expected));
+  const inspectorShown = panelHeights(columns, rows, snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode).showInspector;
+
+  // A resize can take the inspector off screen while it still holds focus,
+  // which would leave the keyboard looking dead with nothing on screen to
+  // explain why.
+  useEffect(() => {
+    if (inspectorFocused && !inspectorShown) setInspectorFocused(false);
+  }, [inspectorFocused, inspectorShown]);
 
   useInput((input, key) => {
     if (key.ctrl && input === "q") {
@@ -651,9 +687,14 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       if (overlay === "queue_offer") orchestrator.cancelQueueOffer();
       if (overlay === "handoff") orchestrator.cancelRoleHandoff();
       if (overlay === "isolated" && snapshot.isolated?.lifecycle === "preview") orchestrator.cancelIsolatedPlan();
+      // Remember the dismissal so the inbox effect does not immediately
+      // reopen the overlay the user just closed.
+      if (overlay === "approval") dismissedApprovalCount.current = snapshot.approvals.length;
       setOverlay(null);
       setWriterConfirm(false);
       setDestructiveConfirm(false);
+      setIsolatedDiscardConfirm(false);
+      setArmedApproval(null);
       return;
     }
     if (overlay === "help") {
@@ -698,10 +739,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
     if (overlay === "queue") {
       const count = Math.max(1, snapshot.queue.length);
-      if (key.upArrow) setQueueIndex((index) => (index - 1 + count) % count);
-      else if (key.downArrow) setQueueIndex((index) => (index + 1) % count);
+      if (key.upArrow) setQueueIndex((index) => (Math.min(index, count - 1) - 1 + count) % count);
+      else if (key.downArrow) setQueueIndex((index) => (Math.min(index, count - 1) + 1) % count);
       else {
-        const item = snapshot.queue[queueIndex] ?? snapshot.queue[0];
+        const item = snapshot.queue[Math.min(queueIndex, count - 1)] ?? snapshot.queue[0];
         if (item && input.toLowerCase() === "d") orchestrator.removeQueued(item.id);
         else if (item && input.toLowerCase() === "c") orchestrator.confirmQueued(item.id);
       }
@@ -768,13 +809,30 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       return;
     }
     if (overlay === "approval") {
-      if (key.upArrow) setApprovalIndex((index) => (index - 1 + Math.max(1, snapshot.approvals.length)) % Math.max(1, snapshot.approvals.length));
-      else if (key.downArrow) setApprovalIndex((index) => (index + 1) % Math.max(1, snapshot.approvals.length));
-      else {
+      const count = Math.max(1, snapshot.approvals.length);
+      if (key.upArrow) {
+        setApprovalIndex((index) => (index - 1 + count) % count);
+        setArmedApproval(null);
+      } else if (key.downArrow) {
+        setApprovalIndex((index) => (index + 1) % count);
+        setArmedApproval(null);
+      } else {
         const approval = snapshot.approvals[approvalIndex] ?? snapshot.approvals[0];
-        if (approval && input.toLowerCase() === "a") orchestrator.resolveApproval(approval.id, "allow_once");
-        else if (approval && input.toLowerCase() === "d") orchestrator.resolveApproval(approval.id, "deny");
-        else if (approval && input.toLowerCase() === "x") orchestrator.resolveApproval(approval.id, "cancel_turn");
+        // Granting authority is the one decision here that is not fail-closed,
+        // so it takes a second deliberate keystroke on the same request. Deny
+        // and cancel stay single-key because they only ever withhold authority.
+        if (approval && input.toLowerCase() === "a") {
+          if (armedApproval === approval.id) {
+            orchestrator.resolveApproval(approval.id, "allow_once");
+            setArmedApproval(null);
+          } else setArmedApproval(approval.id);
+        } else if (approval && input.toLowerCase() === "d") {
+          orchestrator.resolveApproval(approval.id, "deny");
+          setArmedApproval(null);
+        } else if (approval && input.toLowerCase() === "x") {
+          orchestrator.resolveApproval(approval.id, "cancel_turn");
+          setArmedApproval(null);
+        }
       }
       return;
     }
@@ -784,7 +842,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
         const index = mechanisms.indexOf(snapshot.review.mechanism);
         const next = mechanisms[(index + 1) % mechanisms.length];
         if (next) orchestrator.setReviewMechanism(next);
-      } else if (input.toLowerCase() === "t") {
+      } else if (key.meta && input.toLowerCase() === "t") {
         void orchestrator.startTwoLensReview(reviewCriteria).then((started) => { if (started) closeOverlayIfStill("review"); });
       } else if (key.return) {
         void orchestrator.startReview(reviewCriteria).then((started) => { if (started) closeOverlayIfStill("review"); });
@@ -849,34 +907,59 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       } else if (input.toLowerCase() === "k" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
         void orchestrator.retainIsolated();
       } else if (input.toLowerCase() === "c" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+        setIsolatedDiscardConfirm(false);
         if (!destructiveConfirm) setDestructiveConfirm(true);
         else void orchestrator.cleanupIsolated().then(() => setDestructiveConfirm(false));
+      } else if (input.toLowerCase() === "d" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+        setDestructiveConfirm(false);
+        if (!isolatedDiscardConfirm) setIsolatedDiscardConfirm(true);
+        else {
+          void orchestrator.discardIsolated().then((discarded) => {
+            setIsolatedDiscardConfirm(false);
+            if (discarded) closeOverlayIfStill("isolated");
+          });
+        }
       }
       return;
     }
+    // The inspector consumes only its own navigation keys. Anything else must
+    // still reach the global handlers below; swallowing every key would disable
+    // help, the approval inbox, and lane cancellation while a read-only panel
+    // happens to hold focus.
     if (inspectorFocused) {
-      if (key.tab) setInspectorFocused(false);
-      else if (input === "[" || input === "]") {
+      if (key.tab) {
+        setInspectorFocused(false);
+        return;
+      }
+      if (input === "[" || input === "]") {
         setInspectorTab((current) => {
           const index = INSPECTOR_TABS.indexOf(current);
           const offset = input === "]" ? 1 : -1;
           return INSPECTOR_TABS[(index + offset + INSPECTOR_TABS.length) % INSPECTOR_TABS.length] ?? "changes";
         });
-      } else if (key.upArrow || key.downArrow) {
+        return;
+      }
+      if (key.upArrow || key.downArrow) {
         const count = snapshot.git.files.length;
         if (count) {
           const next = Math.max(0, Math.min(count - 1, evidenceIndex + (key.downArrow ? 1 : -1)));
           setEvidenceIndex(next);
           setInspectorTab("file");
           void orchestrator.selectEvidenceFile(snapshot.git.files[next]!);
-        }
+        } else orchestrator.showNotice("No changed files to preview. ^E rechecks the working tree.");
+        return;
       }
-      return;
     }
-    if (key.tab && panelHeights(columns, rows, snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode).showInspector) {
-      setInspectorFocused(true);
-      const path = snapshot.git.files[evidenceIndex];
-      if (path) void orchestrator.selectEvidenceFile(path);
+    if (key.tab) {
+      if (inspectorShown) {
+        setInspectorFocused(true);
+        const path = snapshot.git.files[evidenceIndex];
+        if (path) void orchestrator.selectEvidenceFile(path);
+      } else {
+        orchestrator.showNotice(snapshot.inspectorVisible
+          ? `The evidence inspector needs 100+ columns before Tab can focus it; this terminal is ${columns}. Option+0 focuses one lane.`
+          : "The evidence inspector is hidden. Option+I shows it, then Tab focuses it.");
+      }
       return;
     }
     if (key.pageUp || key.pageDown || key.home || key.end) {
@@ -918,12 +1001,16 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
     else if (key.ctrl && input === "x") void orchestrator.cancel(snapshot.focusedProvider);
     else if (key.meta && input.toLowerCase() === "i") {
-      if (snapshot.inspectorVisible) setInspectorFocused(false);
+      // The width warning belongs only to the turn-on direction; deliberately
+      // hiding the inspector is never a failure to show it.
+      const turningOn = !snapshot.inspectorVisible;
+      if (!turningOn) setInspectorFocused(false);
       orchestrator.toggleInspector();
-      if (!panelHeights(columns, rows, !snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode).showInspector) {
-        orchestrator.showNotice(`Evidence inspector needs 100+ columns; this terminal is ${columns}. Option+0 focuses one lane.`);
-      }
+      if (!turningOn) return;
+      if (panelHeights(columns, rows, true, Boolean(snapshot.notice), viewMode).showInspector) void orchestrator.refreshEvidence();
+      else orchestrator.showNotice(`Evidence inspector needs 100+ columns; this terminal is ${columns}. Option+0 focuses one lane.`);
     }
+    else if (key.ctrl && input === "e") void orchestrator.refreshEvidence();
     else if (key.ctrl && input === "v") {
       setReviewCriteria("");
       void orchestrator.prepareReview().then((ready) => { if (ready) setOverlay("review"); });
@@ -951,6 +1038,8 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
     else if (key.ctrl && input === "a") {
       setApprovalIndex(0);
+      setArmedApproval(null);
+      dismissedApprovalCount.current = 0;
       setOverlay("approval");
     }
     else if (key.meta && input.toLowerCase() === "m") {
@@ -979,6 +1068,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     }
     else if (key.ctrl && input === "l") {
       setDestructiveConfirm(false);
+      setIsolatedDiscardConfirm(false);
       if (snapshot.isolated && snapshot.isolated.lifecycle !== "cleaned") setOverlay("isolated");
       else void orchestrator.prepareIsolated().then((ready) => { if (ready) setOverlay("isolated"); });
     }
@@ -996,8 +1086,8 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
         }
       } else void orchestrator.dispatch(prompt).then((sent) => { if (sent) setPrompt(""); });
     } else if (key.backspace || key.delete) setPrompt(removeLastGrapheme(prompt));
-    else if (!key.ctrl && !key.meta) setPrompt((current) => current + input);
+    else if (!key.ctrl && !key.meta && input) setPrompt((current) => current + input);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} viewMode={viewMode} composerMode={composerMode} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} inspectorTab={inspectorTab} inspectorFocused={inspectorFocused} evidenceIndex={evidenceIndex} />;
+  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} viewMode={viewMode} composerMode={composerMode} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} approvalArmed={armedApproval !== null} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} isolatedDiscardConfirm={isolatedDiscardConfirm} inspectorTab={inspectorTab} inspectorFocused={inspectorFocused} evidenceIndex={evidenceIndex} />;
 }

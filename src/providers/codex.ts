@@ -21,6 +21,9 @@ import { ProviderSessionInvalidatedError } from "../core/provider-error.ts";
 import { sanitizeIdentifier, sanitizeTerminalText } from "../terminal/sanitize.ts";
 import { isAuthenticWriterLease } from "../workspace/guard.ts";
 import { CodexRpcClient, CodexRpcResponseError, type RpcMessage } from "./codex-rpc.ts";
+import packageJson from "../../package.json";
+
+const SPLITLANE_CLIENT_VERSION = packageJson.version;
 
 interface ThreadStartResponse {
   thread: { id: string };
@@ -223,14 +226,22 @@ export class CodexAdapter implements ProviderAdapter {
       ? this.options.rpcFactory(onNotification, onServerRequest, onExit)
       : new CodexRpcClient(onNotification, onServerRequest, onExit, this.options.command ?? "codex", this.options.appServerArgs ?? ["app-server", "--stdio"]);
     await rpc.start();
-    await rpc.request("initialize", {
-      clientInfo: {
-        name: "splitlane",
-        title: "Splitlane",
-        version: "0.0.7",
-      },
-      capabilities: { experimentalApi: false },
-    });
+    try {
+      await rpc.request("initialize", {
+        clientInfo: {
+          name: "splitlane",
+          title: "Splitlane",
+          version: SPLITLANE_CLIENT_VERSION,
+        },
+        capabilities: { experimentalApi: false },
+      });
+    } catch (error) {
+      // The child is already spawned but was never adopted as #rpc, so nothing
+      // else will ever close it. Each retry would otherwise leave another
+      // detached app-server running until Splitlane exits.
+      await rpc.close().catch(() => undefined);
+      throw error;
+    }
     rpc.notify("initialized");
     this.#rpc = rpc;
     return rpc;
