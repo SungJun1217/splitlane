@@ -29,7 +29,15 @@ import { ClaudeAdapter, claudePermissionResult, parseClaudeMessage } from "./pro
 import { CodexAdapter, codexApprovalResponse, parseCodexApprovalRequest, parseCodexNotification, supportsCodexNativeReviewSchema } from "./providers/codex.ts";
 import { CodexRpcClient } from "./providers/codex-rpc.ts";
 import { GitObserver, parseStatus } from "./git/observer.ts";
-import { overlayAfterDispatch, SplitlaneView } from "./ui/app.tsx";
+import { App, overlayAfterDispatch, SplitlaneView } from "./ui/app.tsx";
+import { initialState, reduce, type InteractionContext, type InteractionState } from "./ui/interaction.ts";
+import { resolveIntent } from "./ui/keymap.ts";
+
+/** The renderer facts the state machine needs. Wide terminal by default, so a
+ * test only says otherwise when the size is the point. */
+function viewContext(patch: Partial<InteractionContext> = {}): InteractionContext {
+  return { inspectorShown: true, inspectorWouldFit: true, columns: 140, ...patch };
+}
 import {
   contentHeight,
   fitsTerminal,
@@ -1513,15 +1521,18 @@ describe("layout safety and modal visibility", () => {
   });
 
   test("nothing typed on a fresh start can reach write access without a mode switch", () => {
-    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
-    // The composer default has to agree with the workspace default: the initial
-    // state is compare mode with writer NONE because read-only is safe, so the
-    // first Enter must send a prompt, not open a writer-grant gate.
-    expect(source).toContain('useState<ComposerMode>("direct")');
     const { orchestrator } = setup();
     const snapshot = orchestrator.getSnapshot();
     expect(snapshot.mode).toBe("compare");
     expect(snapshot.writer).toBeNull();
+    // The composer default has to agree with the workspace default: the initial
+    // state is compare mode with writer NONE because read-only is safe, so the
+    // first Enter must send a prompt, not open a writer-grant gate.
+    const fresh = initialState(snapshot);
+    expect(fresh.composerMode).toBe("direct");
+    const submitted = reduce(fresh, { type: "submit" }, snapshot, viewContext());
+    expect(submitted.state.overlay).toBeNull();
+    expect(submitted.commands).toEqual([{ kind: "dispatch", prompt: "" }]);
     const screen = plain(renderToString(
       <SplitlaneView snapshot={snapshot} prompt="안녕~" columns={120} rows={30} composerMode="direct" />,
       { columns: 120 },
@@ -1553,21 +1564,22 @@ describe("layout safety and modal visibility", () => {
     expect(confirm).toContain("G grant Codex the writer lease and start the turn");
     expect(confirm).not.toContain("Enter grant");
 
-    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
-    const handler = source.slice(source.indexOf("useInput((input, key)"));
-    // Ink reports Ctrl+G as a bare "g", so a grant keyed off the letter alone
-    // would hand out the lease to whoever pressed the help shortcut at the
-    // confirmation step. Every overlay letter goes through `letter`, which is
-    // empty for a modified keystroke.
-    expect(handler).toContain('const letter = key.ctrl || key.meta ? "" : input.toLowerCase();');
-    for (const overlay of ["flow_start", "writer"]) {
-      const start = handler.indexOf(`if (overlay === "${overlay}")`);
-      const branch = handler.slice(start, handler.indexOf("\n    }", start));
-      expect(branch).toContain('letter === "g" && writerConfirm');
-      expect(branch).not.toContain('input.toLowerCase() === "g"');
-      // `key.return` may only reach the confirmation, never past it.
-      expect(branch).not.toMatch(/else if \(key\.return\)\s*\{/);
-    }
+    // Enter may only reach the confirmation, never pass it, and granting takes a
+    // different key because Ink reports Ctrl+G as a bare "g".
+    const typed = { ...initialState(base), prompt: "안녕~", composerMode: "flow" as const };
+    const opened = reduce(typed, { type: "submit" }, base, viewContext());
+    expect(opened.state.overlay).toBe("flow_start");
+    expect(opened.state.writerConfirm).toBe(false);
+    expect(opened.commands).toEqual([]);
+    const confirmStep = reduce(opened.state, { type: "flow_enter" }, base, viewContext());
+    expect(confirmStep.state.writerConfirm).toBe(true);
+    expect(confirmStep.commands).toEqual([]);
+    // A repeated Enter cannot grant.
+    expect(reduce(confirmStep.state, { type: "flow_enter" }, base, viewContext()).commands).toEqual([]);
+    expect(reduce(confirmStep.state, { type: "flow_grant" }, base, viewContext()).commands)
+      .toEqual([{ kind: "startGuidedBuild", prompt: "안녕~", dirtyAcknowledged: base.git.dirty }]);
+    // The first step can never grant, whichever key arrives.
+    expect(reduce(opened.state, { type: "flow_grant" }, base, viewContext()).commands).toEqual([]);
 
     // The explanation costs a row, and an overlay clips from the bottom — the
     // action hint and the escape route must survive a short terminal.
@@ -1681,9 +1693,8 @@ describe("layout safety and modal visibility", () => {
   });
 
   test("the help overlay documents every keyboard action the app binds", () => {
-    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
-    const handler = source.slice(source.indexOf("useInput((input, key)"));
-    const bound = new Set([...handler.matchAll(/key\.ctrl && input === "([a-z])"/g)].map((match) => match[1]!.toUpperCase()));
+    const source = readFileSync(join(process.cwd(), "src", "ui", "keymap.ts"), "utf8");
+    const bound = new Set([...source.matchAll(/ctrl\(key, "([a-z])"\)/g)].map((match) => match[1]!.toUpperCase()));
     const { orchestrator } = setup();
     const help = renderToString(
       <SplitlaneView snapshot={orchestrator.getSnapshot()} prompt="" columns={140} rows={40} overlay="help" />,
@@ -1698,43 +1709,49 @@ describe("layout safety and modal visibility", () => {
   });
 
   test("an overlay that accepts typing never binds a bare letter to an action", () => {
-    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
-    const handler = source.slice(source.indexOf("useInput((input, key)"));
-    for (const overlay of ["review", "model"]) {
-      const start = handler.indexOf(`if (overlay === "${overlay}")`);
-      expect(start).toBeGreaterThan(-1);
-      const branch = handler.slice(start, handler.indexOf("\n    }", start));
-      // These two branches append to a field, so a bare letter action reached
-      // before the append would make that letter impossible to type — and here
-      // it would fire a destructive action mid-word. The handler-wide scan for
-      // bare-letter actions lives in the next test.
-      expect(branch).toContain(overlay === "review" ? "setReviewCriteria" : "setModelDraft");
-      expect(branch).not.toContain("letter ===");
+    // These overlays append to a field, so a letter bound to an action would be
+    // impossible to type — and here it would fire a destructive action mid-word.
+    for (const [overlay, expected] of [["review", "review_type"], ["model", "model_type"]] as const) {
+      for (const letter of "abcdefghijklmnopqrstuvwxyz") {
+        expect(resolveIntent({ input: letter }, { overlay, inspectorFocused: false }))
+          .toEqual({ type: expected, text: letter });
+      }
     }
   });
 
   test("a Ctrl shortcut never doubles as an action key inside an overlay", () => {
-    const source = readFileSync(join(process.cwd(), "src", "ui", "app.tsx"), "utf8");
-    const handler = source.slice(source.indexOf("useInput((input, key)"));
-    // Ink reports Ctrl+<letter> as the bare letter with key.ctrl set, so any
-    // action compared against the letter alone also fires for the Ctrl shortcut
-    // sharing it: Ctrl+G granted the writer lease, Ctrl+A allowed an approval,
-    // Ctrl+D discarded an isolated run. Every letter action goes through
-    // `letter`, which is empty for a modified keystroke.
-    const offenders = handler.split("\n").filter((line) =>
-      line.includes("input.toLowerCase() ===") && !line.includes("key.meta"));
-    expect(offenders).toEqual([]);
-    for (const [overlay, armed] of [["approval", 'letter === "a"'], ["isolated", 'letter === "d"']] as const) {
-      const start = handler.indexOf(`if (overlay === "${overlay}") {`);
-      expect(start).toBeGreaterThan(-1);
-      expect(handler.slice(start, handler.indexOf("\n    }", start))).toContain(armed);
+    // Ink reports Ctrl+<letter> as the bare letter with `ctrl` set, so an action
+    // matched on the letter alone also fires for the Ctrl shortcut sharing it:
+    // Ctrl+G granted the writer lease, Ctrl+A allowed an approval, Ctrl+D
+    // discarded an isolated run.
+    const collisions = [
+      { overlay: "flow_start", letter: "g", action: "flow_grant" },
+      { overlay: "writer", letter: "g", action: "writer_grant" },
+      { overlay: "approval", letter: "a", action: "approval_allow" },
+      { overlay: "approval", letter: "d", action: "approval_deny" },
+      { overlay: "isolated", letter: "d", action: "isolated_discard" },
+      { overlay: "isolated", letter: "c", action: "isolated_cleanup" },
+      { overlay: "restore", letter: "r", action: "restore_confirm" },
+      { overlay: "reset_session", letter: "r", action: "reset_confirm" },
+      { overlay: "findings", letter: "a", action: "findings_accept" },
+      { overlay: "queue", letter: "d", action: "queue_remove" },
+    ] as const;
+    for (const { overlay, letter, action } of collisions) {
+      const scope = { overlay, inspectorFocused: false };
+      expect(resolveIntent({ input: letter }, scope)).toEqual({ type: action });
+      expect(resolveIntent({ input: letter, ctrl: true }, scope)).not.toEqual({ type: action });
+      expect(resolveIntent({ input: letter, meta: true }, scope)).not.toEqual({ type: action });
     }
+
     // The inspector holds focus over a read-only panel. Text keys have to stop
     // there: falling through built a prompt the user never saw typed, and the
-    // next Enter opened the writer-grant gate on it.
-    const inspector = handler.slice(handler.indexOf("if (inspectorFocused) {"));
-    expect(inspector.slice(0, inspector.indexOf("\n    }"))).toContain(
-      "if (key.return || key.backspace || key.delete || (!key.ctrl && !key.meta && input)) return;");
+    // next Enter opened the writer-grant gate on it. Ctrl shortcuts still pass.
+    const focused = { overlay: null, inspectorFocused: true };
+    expect(resolveIntent({ input: "a" }, focused)).toBeNull();
+    expect(resolveIntent({ input: "", return: true }, focused)).toBeNull();
+    expect(resolveIntent({ input: "", backspace: true }, focused)).toBeNull();
+    expect(resolveIntent({ input: "g", ctrl: true }, focused)).toEqual({ type: "open_help" });
+    expect(resolveIntent({ input: "", tab: true }, focused)).toEqual({ type: "blur_inspector" });
   });
 
   test("doctor separates a missing project path from an unreadable repository", async () => {
@@ -2928,5 +2945,245 @@ describe("read-only desktop mirror", () => {
     expect(second.rest).toBe("");
     // A reader must survive a frame type it does not know and a truncated line.
     expect(decodeFrames('{"type":"future"}\n{ not json\n').frames).toEqual([]);
+  });
+});
+
+describe("interaction state machine", () => {
+  function approval(id: string): AppSnapshot["approvals"][number] {
+    return {
+      id,
+      provider: "codex",
+      turnId: "turn-1",
+      requestedAt: new Date(0).toISOString(),
+      outsideWorkspace: false,
+      providerRequestId: `${id}-provider`,
+      kind: "file_change",
+      tool: "Write",
+      command: "touch approved.txt",
+      cwd: process.cwd(),
+      path: "approved.txt",
+      paths: ["approved.txt"],
+      reason: "test approval",
+      networkEffect: "off",
+    };
+  }
+
+  function machine(snapshot: AppSnapshot, state: InteractionState = initialState(snapshot)) {
+    return {
+      state,
+      send(intent: Parameters<typeof reduce>[1], context = viewContext()) {
+        const transition = reduce(this.state, intent, snapshot, context);
+        this.state = transition.state;
+        return transition;
+      },
+    };
+  }
+
+  test("the writer gate needs its own key for the grant and keeps the overlay open on refusal", () => {
+    const snapshot = setup().orchestrator.getSnapshot();
+    const flow = machine(snapshot);
+    flow.send({ type: "open_writer" });
+    expect(flow.state.overlay).toBe("writer");
+    expect(flow.state.writerProvider).toBe(snapshot.focusedProvider);
+
+    // Before the confirmation the choice can still change; after it, the same key
+    // must not move the target under a confirmed decision.
+    flow.send({ type: "writer_swap_provider" });
+    const chosen = flow.state.writerProvider;
+    expect(chosen).not.toBe(snapshot.focusedProvider);
+    expect(flow.send({ type: "writer_grant" }).commands).toEqual([]);
+    flow.send({ type: "writer_enter" });
+    expect(flow.state.writerConfirm).toBe(true);
+    flow.send({ type: "writer_swap_provider" });
+    expect(flow.state.writerProvider).toBe(chosen);
+
+    expect(flow.send({ type: "writer_grant" }).commands)
+      .toEqual([{ kind: "promoteWriter", provider: chosen, dirtyAcknowledged: snapshot.git.dirty }]);
+    // A refused promotion leaves the overlay up, or the notice explaining the
+    // refusal would be the only thing left and nothing would say what to fix.
+    flow.send({ type: "writer_promoted", promoted: false });
+    expect(flow.state.overlay).toBe("writer");
+    flow.send({ type: "writer_promoted", promoted: true });
+    expect(flow.state.overlay).toBeNull();
+    expect(flow.state.writerConfirm).toBe(false);
+  });
+
+  test("allowing an approval takes two presses on the same request; withholding takes one", () => {
+    const base = setup().orchestrator.getSnapshot();
+    const snapshot: AppSnapshot = { ...base, approvals: [approval("a1"), approval("a2")] };
+    const flow = machine(snapshot);
+    flow.send({ type: "open_approvals" });
+
+    expect(flow.send({ type: "approval_allow" }).commands).toEqual([]);
+    expect(flow.state.armedApproval).toBe("a1");
+    expect(flow.send({ type: "approval_allow" }).commands)
+      .toEqual([{ kind: "resolveApproval", id: "a1", decision: "allow_once" }]);
+    expect(flow.state.armedApproval).toBeNull();
+
+    // Moving off an armed request disarms it, so a press meant for one approval
+    // cannot land on another.
+    flow.send({ type: "approval_allow" });
+    expect(flow.state.armedApproval).toBe("a1");
+    flow.send({ type: "approval_move", offset: 1 });
+    expect(flow.state.armedApproval).toBeNull();
+    expect(flow.state.approvalIndex).toBe(1);
+
+    // Denying and cancelling only ever withhold authority, so they stay single-key.
+    expect(flow.send({ type: "approval_deny" }).commands)
+      .toEqual([{ kind: "resolveApproval", id: "a2", decision: "deny" }]);
+    expect(flow.send({ type: "approval_cancel_turn" }).commands)
+      .toEqual([{ kind: "resolveApproval", id: "a2", decision: "cancel_turn" }]);
+  });
+
+  test("the inbox never takes input from an overlay that owns it and stays closed once dismissed", () => {
+    const base = setup().orchestrator.getSnapshot();
+    const snapshot: AppSnapshot = { ...base, approvals: [approval("a1")] };
+    const busy = machine(snapshot);
+    busy.send({ type: "open_model" });
+    busy.send({ type: "approvals_changed" });
+    expect(busy.state.overlay).toBe("model");
+
+    const idle = machine(snapshot);
+    idle.send({ type: "approvals_changed" });
+    expect(idle.state.overlay).toBe("approval");
+    // Escape records the dismissal, so the effect must not reopen what the user
+    // just closed.
+    idle.send({ type: "escape" });
+    expect(idle.state.overlay).toBeNull();
+    idle.send({ type: "approvals_changed" });
+    expect(idle.state.overlay).toBeNull();
+
+    const emptied = machine({ ...snapshot, approvals: [] });
+    emptied.send({ type: "open_approvals" });
+    emptied.send({ type: "approvals_changed" });
+    expect(emptied.state.overlay).toBeNull();
+  });
+
+  test("both destructive isolated actions need a second press and cancel each other's arming", () => {
+    const base = setup().orchestrator.getSnapshot();
+    const snapshot: AppSnapshot = {
+      ...base,
+      isolated: {
+        schemaVersion: "isolated-run/v1",
+        runId: "run",
+        createdAt: new Date(0).toISOString(),
+        primaryRoot: process.cwd(),
+        baseCommit: "abc",
+        lifecycle: "active",
+        manifestPath: "/tmp/run/manifest.json",
+        error: null,
+        lanes: {
+          claude: { provider: "claude", path: "/tmp/run/claude", branch: "splitlane/run/claude", baseCommit: "abc", processState: "idle", dirty: false, head: "abc", present: true, error: null },
+          codex: { provider: "codex", path: "/tmp/run/codex", branch: "splitlane/run/codex", baseCommit: "abc", processState: "idle", dirty: false, head: "abc", present: true, error: null },
+        },
+      },
+    };
+    const flow = machine(snapshot);
+    flow.send({ type: "open_isolated" });
+    expect(flow.state.overlay).toBe("isolated");
+
+    expect(flow.send({ type: "isolated_discard" }).commands).toEqual([]);
+    expect(flow.state.isolatedDiscardConfirm).toBe(true);
+    // Arming the other destructive action must disarm this one, so a second press
+    // never means "yes" to something the user did not read.
+    expect(flow.send({ type: "isolated_cleanup" }).commands).toEqual([]);
+    expect(flow.state.isolatedDiscardConfirm).toBe(false);
+    expect(flow.state.destructiveConfirm).toBe(true);
+    expect(flow.send({ type: "isolated_cleanup" }).commands).toEqual([{ kind: "cleanupIsolated" }]);
+
+    flow.send({ type: "isolated_cleaned" });
+    expect(flow.state.destructiveConfirm).toBe(false);
+    flow.send({ type: "isolated_discard" });
+    expect(flow.send({ type: "isolated_discard" }).commands).toEqual([{ kind: "discardIsolated" }]);
+  });
+
+  test("a completed guided build prepares the review, and a stopped one explains itself", () => {
+    const base = setup().orchestrator.getSnapshot();
+    const completed: AppSnapshot = {
+      ...base,
+      mode: "build",
+      writer: "codex",
+      lanes: { ...base.lanes, codex: { ...base.lanes.codex, status: "COMPLETED" } },
+    };
+    const flow = machine(completed, { ...initialState(completed), guidedBuildActive: true });
+    const transition = flow.send({ type: "guided_build_status" });
+    expect(transition.commands).toEqual([{ kind: "prepareReview" }]);
+    expect(flow.state.guidedBuildActive).toBe(false);
+    flow.send({ type: "review_prepared", ready: true });
+    expect(flow.state.overlay).toBe("review");
+
+    const failed: AppSnapshot = { ...base, lanes: { ...base.lanes, codex: { ...base.lanes.codex, status: "FAILED" } } };
+    const stopped = machine(failed, { ...initialState(failed), guidedBuildActive: true });
+    const notice = stopped.send({ type: "guided_build_status" }).commands[0];
+    expect(notice).toMatchObject({ kind: "notice" });
+    expect((notice as { message: string }).message).toContain("Claude challenge was not started");
+    expect(stopped.state.guidedBuildActive).toBe(false);
+  });
+
+  test("returned findings hand the writer gate back at its first step", () => {
+    const snapshot = setup().orchestrator.getSnapshot();
+    const flow = machine(snapshot, { ...initialState(snapshot), writerConfirm: true, overlay: "findings" });
+    flow.send({ type: "findings_relayed", relay: "fix finding 1", writer: "codex" });
+    expect(flow.state.prompt).toBe("fix finding 1");
+    expect(flow.state.writerProvider).toBe("codex");
+    // The relay must not inherit a confirmation from the review it came from.
+    expect(flow.state.writerConfirm).toBe(false);
+    expect(flow.state.overlay).toBe("writer");
+
+    // Nothing selected means nothing to relay, and the overlay stays put.
+    const empty = machine(snapshot, { ...initialState(snapshot), overlay: "findings" });
+    empty.send({ type: "findings_relayed", relay: null, writer: "codex" });
+    expect(empty.state.overlay).toBe("findings");
+    expect(empty.state.prompt).toBe("");
+  });
+
+  test("the inspector explains why it cannot take focus in a narrow terminal", () => {
+    const snapshot = setup().orchestrator.getSnapshot();
+    const flow = machine(snapshot);
+    // Too narrow to show it, and hidden on purpose, are different problems and
+    // must not be reported with the same advice.
+    const tooNarrow = flow.send({ type: "focus_inspector" }, viewContext({ inspectorShown: false, columns: 80 }));
+    expect(flow.state.inspectorFocused).toBe(false);
+    expect((tooNarrow.commands[0] as { message: string }).message).toContain("needs 100+ columns");
+    const hidden = machine({ ...snapshot, inspectorVisible: false });
+    const refused = hidden.send({ type: "focus_inspector" }, viewContext({ inspectorShown: false, columns: 140 }));
+    expect((refused.commands[0] as { message: string }).message).toContain("Option+I shows it");
+
+    const visible: AppSnapshot = { ...snapshot, inspectorVisible: true, git: { ...snapshot.git, files: ["src/a.ts"] } };
+    const wide = machine(visible);
+    const focused = wide.send({ type: "focus_inspector" });
+    expect(wide.state.inspectorFocused).toBe(true);
+    expect(focused.commands).toEqual([{ kind: "selectEvidenceFile", path: "src/a.ts" }]);
+  });
+
+  test("a prompt is cleared only once the orchestrator says it was sent", () => {
+    const snapshot = setup().orchestrator.getSnapshot();
+    const flow = machine(snapshot, { ...initialState(snapshot), prompt: "직접 질문" });
+    expect(flow.send({ type: "submit" }).commands).toEqual([{ kind: "dispatch", prompt: "직접 질문" }]);
+    flow.send({ type: "dispatch_settled", sent: false });
+    expect(flow.state.prompt).toBe("직접 질문");
+    flow.send({ type: "dispatch_settled", sent: true });
+    expect(flow.state.prompt).toBe("");
+  });
+
+  test("the Ink host mounts on the state machine and renders its initial state", () => {
+    // The reducer is unit-tested above; this covers the wiring — effects, the
+    // command executor, and the key handler all run on mount, so a broken host
+    // fails here instead of only in a live terminal.
+    const { orchestrator } = setup();
+    const output = plain(renderToString(<App orchestrator={orchestrator} />, { columns: 140 }));
+    expect(output).toContain("SPLITLANE");
+    expect(output).toContain("writer NONE");
+    // The read-only composer default survives the host rewiring.
+    expect(output).toContain("Enter send");
+  });
+
+  test("task flow refuses to start outside compare mode", () => {
+    const base = setup().orchestrator.getSnapshot();
+    const building: AppSnapshot = { ...base, mode: "build", writer: "codex" };
+    const flow = machine(building, { ...initialState(building), composerMode: "flow", prompt: "another task" });
+    const refused = flow.send({ type: "submit" });
+    expect(flow.state.overlay).toBeNull();
+    expect((refused.commands[0] as { message: string }).message).toContain("only from compare mode");
   });
 });

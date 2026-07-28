@@ -4,32 +4,28 @@ import type { AppSnapshot, LaneSnapshot, MetaSessionSnapshot, ProviderId, RoleId
 import type { CompareOrchestrator } from "../core/orchestrator.ts";
 import { providerErrorAction } from "../core/provider-error.ts";
 import { fitsTerminal, LANE_CHROME_COMPACT, LANE_CHROME_FULL, laneOutputHeight, laneOutputRows, minimumRows, MIN_COLUMNS, panelHeights, panelWidths, selectLayout, type ViewMode } from "./layout.ts";
-import { fitLines, lineCount, maxScrollOffset, removeLastGrapheme, scrollWindow, tailLines } from "./text.ts";
+import { fitLines, lineCount, maxScrollOffset, scrollWindow, tailLines } from "./text.ts";
+import {
+  initialState,
+  INSPECTOR_TABS,
+  overlayAfterDispatch,
+  reduce,
+  ROLE_IDS,
+  type ComposerMode,
+  type InspectorTab,
+  type Intent,
+  type InteractionCommand,
+  type InteractionContext,
+  type Overlay,
+} from "./interaction.ts";
+import { isViewportIntent, resolveIntent, type ViewportIntent } from "./keymap.ts";
 
-type Overlay = "flow_start" | "model" | "actions" | "roles" | "diagnostics" | "writer" | "approval" | "review" | "findings" | "activity" | "help" | "queue_offer" | "queue" | "configuration" | "restore" | "reset_session" | "handoff" | "isolated" | null;
-type ComposerMode = "flow" | "direct";
-type InspectorTab = "changes" | "diff" | "file" | "findings";
-const INSPECTOR_TABS: readonly InspectorTab[] = ["changes", "diff", "file", "findings"];
+// Re-exported because the state machine, not the view, owns this rule.
+export { overlayAfterDispatch };
+
 const FINDINGS_WINDOW = 6;
 const QUEUE_WINDOW = 8;
 const NOTICE_TTL_MS = 12_000;
-
-/** A dispatch can raise an approval before its own promise resolves. Closing
- * the overlay unconditionally would then dismiss the approval inbox that the
- * approvals effect just opened, leaving the lane BLOCKED with nothing on
- * screen, so only the overlay we opened may be closed. */
-export function overlayAfterDispatch(current: Overlay, expected: Overlay): Overlay {
-  return current === expected ? null : current;
-}
-
-const ROLE_IDS: readonly RoleId[] = [
-  "scout",
-  "architect",
-  "builder",
-  "debugger",
-  "intent_reviewer",
-  "correctness_reviewer",
-];
 
 function modelSourceLabel(source: LaneSnapshot["modelSource"]): string {
   return source === "provider_default" ? "CLI default" : `${source} setting`;
@@ -560,37 +556,202 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   const snapshot = useSyncExternalStore(orchestrator.subscribe, orchestrator.getSnapshot, orchestrator.getSnapshot);
   const { columns, rows } = useWindowSize();
   const { exit } = useApp();
-  const [prompt, setPrompt] = useState("");
+  // Interaction lives in the shared state machine; only viewport state, which
+  // needs terminal geometry, stays here. See src/ui/interaction.ts.
+  const [state, setState] = useState(() => initialState(snapshot));
   const [viewMode, setViewMode] = useState<ViewMode>("both");
-  // Read-only is the safe default everywhere else in the initial state (compare
-  // mode, writer NONE), so the composer starts read-only too. See
-  // docs/PRODUCT_PLAN.md.
-  const [composerMode, setComposerMode] = useState<ComposerMode>("direct");
-  const [guidedBuildActive, setGuidedBuildActive] = useState(false);
-  const [overlay, setOverlay] = useState<Overlay>(() => snapshot.restorableSessions.length ? "restore" : null);
-  const [modelProvider, setModelProvider] = useState<ProviderId>(snapshot.focusedProvider);
-  const [modelDraft, setModelDraft] = useState("");
-  const [roleIndex, setRoleIndex] = useState(0);
-  const [roleProvider, setRoleProvider] = useState<ProviderId>("claude");
-  const [writerProvider, setWriterProvider] = useState<ProviderId>(snapshot.focusedProvider);
-  const [writerConfirm, setWriterConfirm] = useState(false);
-  const [approvalIndex, setApprovalIndex] = useState(0);
-  const [armedApproval, setArmedApproval] = useState<string | null>(null);
-  const dismissedApprovalCount = useRef(0);
-  const [reviewCriteria, setReviewCriteria] = useState("");
-  const [findingIndex, setFindingIndex] = useState(0);
-  const [staleAcknowledged, setStaleAcknowledged] = useState(false);
   const [scrollOffsets, setScrollOffsets] = useState<Record<ProviderId, number>>({ claude: 0, codex: 0 });
   const previousLineCounts = useRef<Record<ProviderId, number>>({ claude: 0, codex: 0 });
-  const [activityIndex, setActivityIndex] = useState(0);
-  const [activityExpanded, setActivityExpanded] = useState(snapshot.configuration.showTools === "expanded");
-  const [queueIndex, setQueueIndex] = useState(0);
-  const [restoreInspect, setRestoreInspect] = useState(false);
-  const [destructiveConfirm, setDestructiveConfirm] = useState(false);
-  const [isolatedDiscardConfirm, setIsolatedDiscardConfirm] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("changes");
-  const [inspectorFocused, setInspectorFocused] = useState(false);
-  const [evidenceIndex, setEvidenceIndex] = useState(0);
+
+  const inspectorShown = panelHeights(columns, rows, snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode).showInspector;
+  const context: InteractionContext = {
+    inspectorShown,
+    inspectorWouldFit: panelHeights(columns, rows, true, Boolean(snapshot.notice), viewMode).showInspector,
+    columns,
+  };
+
+  // A transition reads the latest state and snapshot from refs rather than from
+  // the render closure, so a command that reports its result immediately reduces
+  // against what is on screen now instead of a stale copy.
+  const stateRef = useRef(state);
+  const snapshotRef = useRef(snapshot);
+  const contextRef = useRef(context);
+  stateRef.current = state;
+  snapshotRef.current = snapshot;
+  contextRef.current = context;
+
+  const dispatchIntent = (intent: Intent): void => {
+    const transition = reduce(stateRef.current, intent, snapshotRef.current, contextRef.current);
+    stateRef.current = transition.state;
+    setState(transition.state);
+    for (const command of transition.commands) runCommand(command);
+  };
+
+  function runCommand(command: InteractionCommand): void {
+    switch (command.kind) {
+      case "quit":
+        void Promise.allSettled([orchestrator.close(), onBeforeExit?.()]).finally(exit);
+        return;
+      case "notice":
+        orchestrator.showNotice(command.message);
+        return;
+      case "focus":
+        orchestrator.focus(command.provider);
+        return;
+      case "setTarget":
+        orchestrator.setTarget(command.target);
+        return;
+      case "cycleTarget":
+        orchestrator.cycleTarget();
+        return;
+      case "cancel":
+        void orchestrator.cancel(command.provider);
+        return;
+      case "toggleInspector":
+        orchestrator.toggleInspector();
+        return;
+      case "refreshEvidence":
+        void orchestrator.refreshEvidence();
+        return;
+      case "selectEvidenceFile":
+        void orchestrator.selectEvidenceFile(command.path);
+        return;
+      case "selectFinding":
+        void orchestrator.selectFinding(command.id);
+        return;
+      case "toggleFinding":
+        orchestrator.toggleFinding(command.id);
+        return;
+      case "setReviewMechanism":
+        orchestrator.setReviewMechanism(command.mechanism);
+        return;
+      case "selectReviewLens":
+        orchestrator.selectReviewLens(command.provider);
+        return;
+      case "setModel":
+        orchestrator.setModel(command.provider, command.model);
+        return;
+      case "setRole":
+        orchestrator.setRole(command.role, command.provider);
+        return;
+      case "resetRoleHandoffChain":
+        orchestrator.resetRoleHandoffChain();
+        return;
+      case "resolveApproval":
+        orchestrator.resolveApproval(command.id, command.decision);
+        return;
+      case "removeQueued":
+        orchestrator.removeQueued(command.id);
+        return;
+      case "confirmQueued":
+        orchestrator.confirmQueued(command.id);
+        return;
+      case "confirmQueueOffer":
+        dispatchIntent({ type: "queue_offer_settled", accepted: orchestrator.confirmQueueOffer() });
+        return;
+      case "cancelQueueOffer":
+        orchestrator.cancelQueueOffer();
+        return;
+      case "confirmRoleHandoff":
+        dispatchIntent({ type: "handoff_prompt", prompt: orchestrator.confirmRoleHandoff() });
+        return;
+      case "cancelRoleHandoff":
+        orchestrator.cancelRoleHandoff();
+        return;
+      case "prepareRoleHandoff":
+        void orchestrator.prepareRoleHandoff(command.prompt)
+          .then((ready) => dispatchIntent({ type: "handoff_prepared", ready }));
+        return;
+      case "cancelIsolatedPlan":
+        orchestrator.cancelIsolatedPlan();
+        return;
+      case "revokeWriter":
+        void orchestrator.revokeWriter();
+        return;
+      case "dispatch":
+        void orchestrator.dispatch(command.prompt).then((sent) => dispatchIntent({ type: "dispatch_settled", sent }));
+        return;
+      case "startGuidedBuild":
+        void orchestrator.startGuidedBuild(command.prompt, command.dirtyAcknowledged)
+          .then((started) => dispatchIntent({ type: "guided_build_settled", started }));
+        return;
+      case "promoteWriter":
+        void orchestrator.promoteWriter(command.provider, command.dirtyAcknowledged)
+          .then((promoted) => dispatchIntent({ type: "writer_promoted", promoted }));
+        return;
+      case "prepareReview":
+        void orchestrator.prepareReview().then((ready) => dispatchIntent({ type: "review_prepared", ready }));
+        return;
+      case "startReview":
+        void orchestrator.startReview(command.criteria)
+          .then((started) => dispatchIntent({ type: "review_started", started }));
+        return;
+      case "startTwoLensReview":
+        void orchestrator.startTwoLensReview(command.criteria)
+          .then((started) => dispatchIntent({ type: "review_started", started }));
+        return;
+      case "finishReview":
+        dispatchIntent({ type: "review_finished", finished: orchestrator.finishReview(command.outcome) });
+        return;
+      case "returnSelectedFindings": {
+        const writer = snapshotRef.current.review?.writer;
+        const relay = orchestrator.returnSelectedFindings(command.staleAcknowledged);
+        if (writer) dispatchIntent({ type: "findings_relayed", relay, writer });
+        return;
+      }
+      case "prepareIsolated":
+        void orchestrator.prepareIsolated().then((ready) => dispatchIntent({ type: "isolated_prepared", ready }));
+        return;
+      case "startIsolated":
+        void orchestrator.startIsolated();
+        return;
+      case "refreshIsolated":
+        void orchestrator.refreshIsolated();
+        return;
+      case "retainIsolated":
+        void orchestrator.retainIsolated();
+        return;
+      case "cleanupIsolated":
+        void orchestrator.cleanupIsolated().then(() => dispatchIntent({ type: "isolated_cleaned" }));
+        return;
+      case "discardIsolated":
+        void orchestrator.discardIsolated()
+          .then((discarded) => dispatchIntent({ type: "isolated_discarded", discarded }));
+        return;
+      case "startNewSessions":
+        void orchestrator.startNewSessions().then(() => dispatchIntent({ type: "sessions_settled", done: true }));
+        return;
+      case "restoreSessions":
+        void orchestrator.restoreSessions().then(() => dispatchIntent({ type: "sessions_settled", done: true }));
+        return;
+      case "resetSession":
+        void orchestrator.resetSession(command.provider)
+          .then((reset) => dispatchIntent({ type: "session_reset", reset }));
+        return;
+    }
+  }
+
+  function runViewportIntent(intent: ViewportIntent): void {
+    if (intent.type === "toggle_view") {
+      setViewMode((current) => current === "both" ? "focused" : "both");
+      return;
+    }
+    const provider = snapshot.focusedProvider;
+    const lane = snapshot.lanes[provider];
+    const viewportHeight = laneOutputHeight(columns, rows, snapshot.inspectorVisible, Boolean(lane.error), Boolean(snapshot.notice), viewMode);
+    const maximum = maxScrollOffset(lane.output, viewportHeight);
+    const page = Math.max(1, viewportHeight - 1);
+    setScrollOffsets((current) => ({
+      ...current,
+      [provider]: intent.direction === "bottom"
+        ? 0
+        : intent.direction === "top"
+          ? maximum
+          : intent.direction === "up"
+            ? Math.min(maximum, current[provider] + page)
+            : Math.max(0, current[provider] - page),
+    }));
+  }
 
   useEffect(() => {
     const counts: Record<ProviderId, number> = {
@@ -612,43 +773,19 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     previousLineCounts.current = counts;
   }, [snapshot.lanes.claude.output, snapshot.lanes.codex.output]);
 
-  // An approval must never take input away from an overlay that already owns
-  // it: the draft would be lost and the single-key decisions would land under
-  // fingers that were typing something else. The inbox waits for input to be
-  // free instead, which is why `overlay` is a dependency here.
-  useEffect(() => {
-    if (snapshot.approvals.length > 0) {
-      setApprovalIndex((index) => Math.min(index, snapshot.approvals.length - 1));
-      if (overlay === null && dismissedApprovalCount.current !== snapshot.approvals.length) setOverlay("approval");
-    } else if (overlay === "approval") setOverlay(null);
-  }, [snapshot.approvals.length, overlay]);
-
-  useEffect(() => {
-    if (snapshot.queueOffer) setOverlay("queue_offer");
-    else if (overlay === "queue_offer") setOverlay(null);
-  }, [snapshot.queueOffer]);
-
-  useEffect(() => {
-    if (snapshot.restorableSessions.length) setOverlay("restore");
-  }, [snapshot.restorableSessions.length]);
-
-  useEffect(() => {
-    if (snapshot.mode === "review" && snapshot.review && snapshot.review.status !== "running") {
-      setFindingIndex(0);
-      setStaleAcknowledged(false);
-      setOverlay("findings");
-      const first = snapshot.review.findings[0];
-      if (first) void orchestrator.selectFinding(first.id);
-    }
-  }, [snapshot.review?.status]);
-
-  useEffect(() => {
-    setEvidenceIndex((index) => Math.min(index, Math.max(0, snapshot.git.files.length - 1)));
-  }, [snapshot.git.files.join("\0")]);
-
-  useEffect(() => {
-    setQueueIndex((index) => Math.min(index, Math.max(0, snapshot.queue.length - 1)));
-  }, [snapshot.queue.length]);
+  // Snapshot changes are intents too, so the machine decides what each one does
+  // to the interface. `state.overlay` is a dependency of the approvals effect
+  // because an inbox must never take input away from an overlay that owns it.
+  useEffect(() => dispatchIntent({ type: "approvals_changed" }), [snapshot.approvals.length, state.overlay]);
+  useEffect(() => dispatchIntent({ type: "queue_offer_changed" }), [snapshot.queueOffer]);
+  useEffect(() => dispatchIntent({ type: "restorable_changed" }), [snapshot.restorableSessions.length]);
+  useEffect(() => dispatchIntent({ type: "review_status_changed" }), [snapshot.review?.status]);
+  useEffect(() => dispatchIntent({ type: "evidence_files_changed" }), [snapshot.git.files.join("\0")]);
+  useEffect(() => dispatchIntent({ type: "queue_length_changed" }), [snapshot.queue.length]);
+  useEffect(
+    () => dispatchIntent({ type: "guided_build_status" }),
+    [state.guidedBuildActive, snapshot.lanes.codex.status, snapshot.mode, snapshot.writer],
+  );
 
   useEffect(() => {
     if (!snapshot.notice) return;
@@ -656,463 +793,46 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
     return () => clearTimeout(timer);
   }, [snapshot.notice]);
 
+  // A resize can take the inspector off screen while it still holds focus, which
+  // would leave the keyboard looking dead with nothing on screen to explain why.
   useEffect(() => {
-    if (!guidedBuildActive) return;
-    const status = snapshot.lanes.codex.status;
-    if (status === "COMPLETED" && snapshot.mode === "build" && snapshot.writer === "codex") {
-      setGuidedBuildActive(false);
-      setReviewCriteria("");
-      void orchestrator.prepareReview().then((ready) => {
-        if (ready) setOverlay("review");
-      });
-    } else if (["FAILED", "CANCELLED", "UNAVAILABLE"].includes(status)) {
-      setGuidedBuildActive(false);
-      orchestrator.showNotice(`Task flow stopped after Codex ${status.toLowerCase()}; Claude challenge was not started.`);
-    }
-  }, [guidedBuildActive, snapshot.lanes.codex.status, snapshot.mode, snapshot.writer]);
-
-  const closeOverlayIfStill = (expected: Overlay) => setOverlay((current) => overlayAfterDispatch(current, expected));
-  const inspectorShown = panelHeights(columns, rows, snapshot.inspectorVisible, Boolean(snapshot.notice), viewMode).showInspector;
-
-  // A resize can take the inspector off screen while it still holds focus,
-  // which would leave the keyboard looking dead with nothing on screen to
-  // explain why.
-  useEffect(() => {
-    if (inspectorFocused && !inspectorShown) setInspectorFocused(false);
-  }, [inspectorFocused, inspectorShown]);
+    if (state.inspectorFocused && !inspectorShown) dispatchIntent({ type: "blur_inspector" });
+  }, [state.inspectorFocused, inspectorShown]);
 
   useInput((input, key) => {
-    // Ink reports Ctrl+<letter> as the bare letter with `key.ctrl` set, so a
-    // branch matching on the letter alone also fires for the Ctrl shortcut that
-    // shares it. Overlay actions therefore compare against `letter`, which is
-    // empty unless the keystroke was an unmodified character.
-    const letter = key.ctrl || key.meta ? "" : input.toLowerCase();
-    if (key.ctrl && input === "q") {
-      void Promise.allSettled([orchestrator.close(), onBeforeExit?.()]).finally(exit);
-      return;
-    }
-    if (key.escape && !overlay && inspectorFocused) {
-      setInspectorFocused(false);
-      return;
-    }
-    if (key.escape) {
-      if (overlay === "queue_offer") orchestrator.cancelQueueOffer();
-      if (overlay === "handoff") orchestrator.cancelRoleHandoff();
-      if (overlay === "isolated" && snapshot.isolated?.lifecycle === "preview") orchestrator.cancelIsolatedPlan();
-      // Remember the dismissal so the inbox effect does not immediately
-      // reopen the overlay the user just closed.
-      if (overlay === "approval") dismissedApprovalCount.current = snapshot.approvals.length;
-      setOverlay(null);
-      setWriterConfirm(false);
-      setDestructiveConfirm(false);
-      setIsolatedDiscardConfirm(false);
-      setArmedApproval(null);
-      return;
-    }
-    if (overlay === "help") {
-      if (key.ctrl && input === "g") setOverlay(null);
-      return;
-    }
-    if (overlay === "flow_start") {
-      if (key.meta && input.toLowerCase() === "d") {
-        setComposerMode("direct");
-        setOverlay(null);
-        setWriterConfirm(false);
-      } else if (key.return && !writerConfirm) setWriterConfirm(true);
-      // The last step grants write authority and starts a paid turn, so it does
-      // not share a key with the step before it. Three identical presses used to
-      // take a typed line all the way from the composer to a granted lease.
-      else if (letter === "g" && writerConfirm) {
-        void orchestrator.startGuidedBuild(prompt, snapshot.git.dirty).then((started) => {
-          if (started) {
-            setPrompt("");
-            setGuidedBuildActive(true);
-            closeOverlayIfStill("flow_start");
-            setWriterConfirm(false);
-          }
-        });
-      }
-      return;
-    }
-    if (overlay === "activity") {
-      const activities = snapshot.lanes[snapshot.focusedProvider].activities;
-      if (key.upArrow) setActivityIndex((index) => Math.max(0, index - 1));
-      else if (key.downArrow) setActivityIndex((index) => Math.min(Math.max(0, activities.length - 1), index + 1));
-      else if (input === " ") setActivityExpanded((value) => !value);
-      else if (key.ctrl && input === "t") setOverlay(null);
-      return;
-    }
-    if (overlay === "queue_offer") {
-      if (letter === "q" && orchestrator.confirmQueueOffer()) {
-        setPrompt("");
-        setOverlay(null);
-      } else if (letter === "c") {
-        orchestrator.cancelQueueOffer();
-        setOverlay(null);
-      }
-      return;
-    }
-    if (overlay === "queue") {
-      const count = Math.max(1, snapshot.queue.length);
-      if (key.upArrow) setQueueIndex((index) => (Math.min(index, count - 1) - 1 + count) % count);
-      else if (key.downArrow) setQueueIndex((index) => (Math.min(index, count - 1) + 1) % count);
-      else {
-        const item = snapshot.queue[Math.min(queueIndex, count - 1)] ?? snapshot.queue[0];
-        if (item && letter === "d") orchestrator.removeQueued(item.id);
-        else if (item && letter === "c") orchestrator.confirmQueued(item.id);
-      }
-      return;
-    }
-    if (overlay === "configuration") {
-      if (key.ctrl && input === "u") setOverlay(null);
-      return;
-    }
-    if (overlay === "restore") {
-      if (letter === "i") setRestoreInspect((value) => !value);
-      else if (letter === "n") void orchestrator.startNewSessions().then(() => setOverlay(null));
-      else if (letter === "r" && !destructiveConfirm) setDestructiveConfirm(true);
-      else if (letter === "r") void orchestrator.restoreSessions().then(() => { setOverlay(null); setDestructiveConfirm(false); });
-      return;
-    }
-    if (overlay === "reset_session") {
-      if (letter === "r" && !destructiveConfirm) setDestructiveConfirm(true);
-      else if (letter === "r") void orchestrator.resetSession(snapshot.focusedProvider).then((reset) => { if (reset) setOverlay(null); setDestructiveConfirm(false); });
-      return;
-    }
-    if (overlay === "model") {
-      if (key.tab) {
-        const next = modelProvider === "claude" ? "codex" : "claude";
-        setModelProvider(next);
-        setModelDraft(snapshot.lanes[next].requestedModel);
-      } else if (key.return) {
-        orchestrator.setModel(modelProvider, modelDraft);
-        setOverlay(null);
-      } else if (key.backspace || key.delete) setModelDraft(removeLastGrapheme(modelDraft));
-      else if (!key.ctrl && !key.meta) setModelDraft((current) => current + input);
-      return;
-    }
-    if (overlay === "roles") {
-      if (key.upArrow) setRoleIndex((index) => (index - 1 + ROLE_IDS.length) % ROLE_IDS.length);
-      else if (key.downArrow) setRoleIndex((index) => (index + 1) % ROLE_IDS.length);
-      else if (key.tab) setRoleProvider((provider) => provider === "claude" ? "codex" : "claude");
-      else if (letter === "x") orchestrator.resetRoleHandoffChain();
-      else if (key.return) {
-        orchestrator.setRole(ROLE_IDS[roleIndex] ?? "scout", roleProvider);
-        setOverlay(null);
-      }
-      return;
-    }
-    if (overlay === "actions") {
-      if (key.ctrl && input === "p") setOverlay(null);
-      return;
-    }
-    if (overlay === "diagnostics") {
-      if (key.ctrl && input === "d") setOverlay(null);
-      return;
-    }
-    if (overlay === "writer") {
-      if (key.tab && !writerConfirm) setWriterProvider((provider) => provider === "claude" ? "codex" : "claude");
-      else if (key.return && !writerConfirm) setWriterConfirm(true);
-      // Granting write authority does not share a key with reaching the
-      // confirmation, for the same reason as the task-flow gate.
-      else if (letter === "g" && writerConfirm) {
-        void orchestrator.promoteWriter(writerProvider, snapshot.git.dirty).then((promoted) => {
-          if (promoted) {
-            closeOverlayIfStill("writer");
-            setWriterConfirm(false);
-          }
-        });
-      }
-      return;
-    }
-    if (overlay === "approval") {
-      const count = Math.max(1, snapshot.approvals.length);
-      if (key.upArrow) {
-        setApprovalIndex((index) => (index - 1 + count) % count);
-        setArmedApproval(null);
-      } else if (key.downArrow) {
-        setApprovalIndex((index) => (index + 1) % count);
-        setArmedApproval(null);
-      } else {
-        const approval = snapshot.approvals[approvalIndex] ?? snapshot.approvals[0];
-        // Granting authority is the one decision here that is not fail-closed,
-        // so it takes a second deliberate keystroke on the same request. Deny
-        // and cancel stay single-key because they only ever withhold authority.
-        if (approval && letter === "a") {
-          if (armedApproval === approval.id) {
-            orchestrator.resolveApproval(approval.id, "allow_once");
-            setArmedApproval(null);
-          } else setArmedApproval(approval.id);
-        } else if (approval && letter === "d") {
-          orchestrator.resolveApproval(approval.id, "deny");
-          setArmedApproval(null);
-        } else if (approval && letter === "x") {
-          orchestrator.resolveApproval(approval.id, "cancel_turn");
-          setArmedApproval(null);
-        }
-      }
-      return;
-    }
-    if (overlay === "review") {
-      if (key.tab && snapshot.review) {
-        const mechanisms = snapshot.review.availableMechanisms;
-        const index = mechanisms.indexOf(snapshot.review.mechanism);
-        const next = mechanisms[(index + 1) % mechanisms.length];
-        if (next) orchestrator.setReviewMechanism(next);
-      } else if (key.meta && input.toLowerCase() === "t") {
-        void orchestrator.startTwoLensReview(reviewCriteria).then((started) => { if (started) closeOverlayIfStill("review"); });
-      } else if (key.return) {
-        void orchestrator.startReview(reviewCriteria).then((started) => { if (started) closeOverlayIfStill("review"); });
-      } else if (key.backspace || key.delete) setReviewCriteria(removeLastGrapheme(reviewCriteria));
-      else if (!key.ctrl && !key.meta) setReviewCriteria((current) => current + input);
-      return;
-    }
-    if (overlay === "findings") {
-      const count = Math.max(1, snapshot.review?.findings.length ?? 0);
-      if (key.tab && snapshot.review?.twoLens) {
-        const next = snapshot.review.activeLens === "claude" ? "codex" : "claude";
-        orchestrator.selectReviewLens(next);
-        setFindingIndex(0);
-      } else if (key.upArrow) {
-        const next = (findingIndex - 1 + count) % count;
-        setFindingIndex(next);
-        const finding = snapshot.review?.findings[next];
-        if (finding) void orchestrator.selectFinding(finding.id);
-      } else if (key.downArrow) {
-        const next = (findingIndex + 1) % count;
-        setFindingIndex(next);
-        const finding = snapshot.review?.findings[next];
-        if (finding) void orchestrator.selectFinding(finding.id);
-      }
-      else {
-        const finding = snapshot.review?.findings[findingIndex] ?? snapshot.review?.findings[0];
-        if (input === " " && finding) orchestrator.toggleFinding(finding.id);
-        else if (letter === "a" && orchestrator.finishReview("accept")) setOverlay(null);
-        else if (letter === "e" && orchestrator.finishReview("exit")) setOverlay(null);
-        else if (letter === "s" && snapshot.review?.stale) setStaleAcknowledged((value) => !value);
-        else if (letter === "r" && snapshot.review) {
-          const relay = orchestrator.returnSelectedFindings(staleAcknowledged);
-          if (relay) {
-            setPrompt(relay);
-            setWriterProvider(snapshot.review.writer);
-            setWriterConfirm(false);
-            setOverlay("writer");
-          }
-        }
-      }
-      return;
-    }
-    if (overlay === "handoff") {
-      if (key.return) {
-        const handoffPrompt = orchestrator.confirmRoleHandoff();
-        if (handoffPrompt) {
-          setPrompt(handoffPrompt);
-          setOverlay(null);
-        }
-      }
-      return;
-    }
-    if (overlay === "isolated") {
-      const lifecycle = snapshot.isolated?.lifecycle;
-      if (key.return && lifecycle === "preview") {
-        void orchestrator.startIsolated();
-      } else if (letter === "x" && lifecycle === "preview") {
-        orchestrator.cancelIsolatedPlan();
-        setOverlay(null);
-      } else if (letter === "r" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
-        void orchestrator.refreshIsolated();
-      } else if (letter === "k" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
-        void orchestrator.retainIsolated();
-      } else if (letter === "c" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
-        setIsolatedDiscardConfirm(false);
-        if (!destructiveConfirm) setDestructiveConfirm(true);
-        else void orchestrator.cleanupIsolated().then(() => setDestructiveConfirm(false));
-      } else if (letter === "d" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
-        setDestructiveConfirm(false);
-        if (!isolatedDiscardConfirm) setIsolatedDiscardConfirm(true);
-        else {
-          void orchestrator.discardIsolated().then((discarded) => {
-            setIsolatedDiscardConfirm(false);
-            if (discarded) closeOverlayIfStill("isolated");
-          });
-        }
-      }
-      return;
-    }
-    // The inspector consumes its own navigation keys and every plain text key.
-    // Ctrl/Option shortcuts still reach the global handlers below; swallowing
-    // them too would disable help, the approval inbox, and lane cancellation
-    // while a read-only panel happens to hold focus.
-    if (inspectorFocused) {
-      if (key.tab) {
-        setInspectorFocused(false);
-        return;
-      }
-      if (input === "[" || input === "]") {
-        setInspectorTab((current) => {
-          const index = INSPECTOR_TABS.indexOf(current);
-          const offset = input === "]" ? 1 : -1;
-          return INSPECTOR_TABS[(index + offset + INSPECTOR_TABS.length) % INSPECTOR_TABS.length] ?? "changes";
-        });
-        return;
-      }
-      if (key.upArrow || key.downArrow) {
-        const count = snapshot.git.files.length;
-        if (count) {
-          const next = Math.max(0, Math.min(count - 1, evidenceIndex + (key.downArrow ? 1 : -1)));
-          setEvidenceIndex(next);
-          setInspectorTab("file");
-          void orchestrator.selectEvidenceFile(snapshot.git.files[next]!);
-        } else orchestrator.showNotice("No changed files to preview. ^E rechecks the working tree.");
-        return;
-      }
-      // Only the modifier shortcuts continue past the inspector. Text keys must
-      // stop here: falling through appended them to the composer while the user
-      // believed they were navigating a read-only panel, and the Enter that
-      // followed opened the writer-grant gate on a prompt nobody wrote.
-      if (key.return || key.backspace || key.delete || (!key.ctrl && !key.meta && input)) return;
-    }
-    if (key.tab) {
-      if (inspectorShown) {
-        setInspectorFocused(true);
-        const path = snapshot.git.files[evidenceIndex];
-        if (path) void orchestrator.selectEvidenceFile(path);
-      } else {
-        orchestrator.showNotice(snapshot.inspectorVisible
-          ? `The evidence inspector needs 100+ columns before Tab can focus it; this terminal is ${columns}. Option+0 focuses one lane.`
-          : "The evidence inspector is hidden. Option+I shows it, then Tab focuses it.");
-      }
-      return;
-    }
-    if (key.pageUp || key.pageDown || key.home || key.end) {
-      const provider = snapshot.focusedProvider;
-      const lane = snapshot.lanes[provider];
-      const viewportHeight = laneOutputHeight(columns, rows, snapshot.inspectorVisible, Boolean(lane.error), Boolean(snapshot.notice), viewMode);
-      const maximum = maxScrollOffset(lane.output, viewportHeight);
-      const page = Math.max(1, viewportHeight - 1);
-      setScrollOffsets((current) => ({
-        ...current,
-        [provider]: key.end
-          ? 0
-          : key.home
-            ? maximum
-            : key.pageUp
-              ? Math.min(maximum, current[provider] + page)
-              : Math.max(0, current[provider] - page),
-      }));
-    } else if (key.meta && input.toLowerCase() === "d") {
-      const next = composerMode === "flow" ? "direct" : "flow";
-      setComposerMode(next);
-      if (next === "flow") {
-        // Task flow always builds with Codex. Say that the route and focus moved
-        // rather than changing them silently, since every other route change is
-        // something the user asked for explicitly.
-        const moved = snapshot.target !== "codex" || snapshot.focusedProvider !== "codex";
-        orchestrator.focus("codex");
-        orchestrator.setTarget("codex");
-        if (moved) orchestrator.showNotice("Task flow builds with Codex, so the send route and lane focus moved to Codex.");
-      }
-    }
-    else if (key.meta && input === "0") setViewMode((current) => current === "both" ? "focused" : "both");
-    else if (key.meta && input === "1") {
-      orchestrator.focus("claude");
-    }
-    else if (key.meta && input === "2") {
-      orchestrator.focus("codex");
-    }
-    else if (key.ctrl && input === "r") {
-      setComposerMode("direct");
-      orchestrator.cycleTarget();
-    }
-    else if (key.ctrl && input === "x") void orchestrator.cancel(snapshot.focusedProvider);
-    else if (key.meta && input.toLowerCase() === "i") {
-      // The width warning belongs only to the turn-on direction; deliberately
-      // hiding the inspector is never a failure to show it.
-      const turningOn = !snapshot.inspectorVisible;
-      if (!turningOn) setInspectorFocused(false);
-      orchestrator.toggleInspector();
-      if (!turningOn) return;
-      if (panelHeights(columns, rows, true, Boolean(snapshot.notice), viewMode).showInspector) void orchestrator.refreshEvidence();
-      else orchestrator.showNotice(`Evidence inspector needs 100+ columns; this terminal is ${columns}. Option+0 focuses one lane.`);
-    }
-    else if (key.ctrl && input === "e") void orchestrator.refreshEvidence();
-    else if (key.ctrl && input === "v") {
-      setReviewCriteria("");
-      void orchestrator.prepareReview().then((ready) => { if (ready) setOverlay("review"); });
-    } else if (key.ctrl && input === "f") {
-      if (!snapshot.review) {
-        orchestrator.showNotice("Review findings are available only after a review draft or completed review exists.");
-        return;
-      }
-      setFindingIndex(0);
-      setStaleAcknowledged(false);
-      setOverlay("findings");
-      const first = snapshot.review.findings[0];
-      if (first) void orchestrator.selectFinding(first.id);
-    } else if (key.ctrl && input === "b") {
-      if (snapshot.mode !== "compare") {
-        orchestrator.showNotice("Writer promotion is available only from compare mode.");
-        return;
-      }
-      setWriterProvider(snapshot.focusedProvider);
-      setWriterConfirm(false);
-      setOverlay("writer");
-    } else if (key.ctrl && input === "w") {
-      if (snapshot.writer) void orchestrator.revokeWriter();
-      else orchestrator.showNotice("There is no writer lease to revoke.");
-    }
-    else if (key.ctrl && input === "a") {
-      setApprovalIndex(0);
-      setArmedApproval(null);
-      dismissedApprovalCount.current = 0;
-      setOverlay("approval");
-    }
-    else if (key.meta && input.toLowerCase() === "m") {
-      setModelProvider(snapshot.focusedProvider);
-      setModelDraft(snapshot.lanes[snapshot.focusedProvider].requestedModel);
-      setOverlay("model");
-    } else if (key.ctrl && input === "p") setOverlay("actions");
-    else if (key.ctrl && input === "g") setOverlay("help");
-    else if (key.ctrl && input === "t") {
-      const activities = snapshot.lanes[snapshot.focusedProvider].activities;
-      setActivityIndex(Math.max(0, activities.length - 1));
-      setActivityExpanded(snapshot.configuration.showTools === "expanded");
-      setOverlay("activity");
-    }
-    else if (key.ctrl && input === "k") {
-      setQueueIndex(0);
-      setOverlay("queue");
-    }
-    else if (key.ctrl && input === "u") setOverlay("configuration");
-    else if (key.ctrl && input === "n") {
-      setDestructiveConfirm(false);
-      setOverlay("reset_session");
-    }
-    else if (key.meta && input.toLowerCase() === "h") {
-      void orchestrator.prepareRoleHandoff(prompt).then((ready) => { if (ready) setOverlay("handoff"); });
-    }
-    else if (key.ctrl && input === "l") {
-      setDestructiveConfirm(false);
-      setIsolatedDiscardConfirm(false);
-      if (snapshot.isolated && snapshot.isolated.lifecycle !== "cleaned") setOverlay("isolated");
-      else void orchestrator.prepareIsolated().then((ready) => { if (ready) setOverlay("isolated"); });
-    }
-    else if (key.ctrl && input === "d") setOverlay("diagnostics");
-    else if (key.ctrl && input === "o") {
-      setRoleProvider(snapshot.roles[ROLE_IDS[roleIndex] ?? "scout"]);
-      setOverlay("roles");
-    } else if (key.return) {
-      if (composerMode === "flow") {
-        if (!prompt.trim()) orchestrator.showNotice("Task is empty.");
-        else if (snapshot.mode !== "compare") orchestrator.showNotice("Task Flow starts only from compare mode; finish or revoke the current workflow first.");
-        else {
-          setWriterConfirm(false);
-          setOverlay("flow_start");
-        }
-      } else void orchestrator.dispatch(prompt).then((sent) => { if (sent) setPrompt(""); });
-    } else if (key.backspace || key.delete) setPrompt(removeLastGrapheme(prompt));
-    else if (!key.ctrl && !key.meta && input) setPrompt((current) => current + input);
+    const intent = resolveIntent({ input, ...key }, { overlay: state.overlay, inspectorFocused: state.inspectorFocused });
+    if (!intent) return;
+    if (isViewportIntent(intent)) runViewportIntent(intent);
+    else dispatchIntent(intent);
   });
 
-  return <SplitlaneView snapshot={snapshot} prompt={prompt} columns={columns} rows={rows} viewMode={viewMode} composerMode={composerMode} overlay={overlay} modelProvider={modelProvider} modelDraft={modelDraft} roleIndex={roleIndex} writerProvider={writerProvider} writerConfirm={writerConfirm} approvalIndex={approvalIndex} approvalArmed={armedApproval !== null} reviewCriteria={reviewCriteria} findingIndex={findingIndex} staleAcknowledged={staleAcknowledged} scrollOffsets={scrollOffsets} activityIndex={activityIndex} activityExpanded={activityExpanded} queueIndex={queueIndex} restoreInspect={restoreInspect} destructiveConfirm={destructiveConfirm} isolatedDiscardConfirm={isolatedDiscardConfirm} inspectorTab={inspectorTab} inspectorFocused={inspectorFocused} evidenceIndex={evidenceIndex} />;
+  return <SplitlaneView
+    snapshot={snapshot}
+    prompt={state.prompt}
+    columns={columns}
+    rows={rows}
+    viewMode={viewMode}
+    composerMode={state.composerMode}
+    overlay={state.overlay}
+    modelProvider={state.modelProvider}
+    modelDraft={state.modelDraft}
+    roleIndex={state.roleIndex}
+    writerProvider={state.writerProvider}
+    writerConfirm={state.writerConfirm}
+    approvalIndex={state.approvalIndex}
+    approvalArmed={state.armedApproval !== null}
+    reviewCriteria={state.reviewCriteria}
+    findingIndex={state.findingIndex}
+    staleAcknowledged={state.staleAcknowledged}
+    scrollOffsets={scrollOffsets}
+    activityIndex={state.activityIndex}
+    activityExpanded={state.activityExpanded}
+    queueIndex={state.queueIndex}
+    restoreInspect={state.restoreInspect}
+    destructiveConfirm={state.destructiveConfirm}
+    isolatedDiscardConfirm={state.isolatedDiscardConfirm}
+    inspectorTab={state.inspectorTab}
+    inspectorFocused={state.inspectorFocused}
+    evidenceIndex={state.evidenceIndex}
+  />;
 }

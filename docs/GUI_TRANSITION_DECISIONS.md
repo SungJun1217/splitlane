@@ -73,19 +73,36 @@ splitlane /repo --mirror                     ← owns the session
 | Stage | Content | Status |
 |---|---|---|
 | 0 | This document; `AGENTS.md` identity and boundary amendments | done |
-| 1 | `MirrorPublisher`, frame protocol, `--mirror`, offline tests | this increment |
-| 2 | Electron shell rendering the mirrored snapshot, read-only | this increment |
-| 3 | Extract the interaction state machine out of `src/ui/app.tsx` into a renderer-agnostic module | **gate for stage 4** |
-| 4 | Intent frames: the GUI drives the session through the shared state machine | not started |
+| 1 | `MirrorPublisher`, frame protocol, `--mirror`, offline tests | done |
+| 2 | Electron shell rendering the mirrored snapshot, read-only | done |
+| 3 | Extract the interaction state machine out of `src/ui/app.tsx` into a renderer-agnostic module | done |
+| 4 | Intent frames: the GUI drives the session through the shared state machine | unblocked, not started |
 | 5 | Packaging: `electron-builder`, signing, release workflow | not started |
 
-Stage 3 is a hard prerequisite for stage 4, not a cleanup. Every authority gate
+Stage 3 was a hard prerequisite for stage 4, not a cleanup. Every authority gate
 — `writerConfirm`, `armedApproval`, `destructiveConfirm`,
-`isolatedDiscardConfirm`, and the overlay machine — currently lives in
-`useState` inside `src/ui/app.tsx`. The 2026-07-28 audit and code review found
-four separate defects in exactly those gates. A second renderer that
-re-implements them re-implements that defect class. The gates must be shared
-before either renderer can grant authority.
+`isolatedDiscardConfirm`, and the overlay machine — used to live in `useState`
+inside `src/ui/app.tsx`, and the 2026-07-28 audit and code review found four
+separate defects in exactly those gates. A second renderer that re-implemented
+them would re-implement that defect class.
+
+As of 2026-07-29 they live in `src/ui/interaction.ts`:
+
+- `reduce(state, intent, snapshot, context)` is pure and returns the next state
+  plus **commands** describing what the host must ask the orchestrator to do.
+  Anything asynchronous reports back as an intent, so the machine — not the
+  renderer — decides what a result means.
+- `src/ui/keymap.ts` maps a keystroke to an intent. The Ctrl-versus-letter
+  decoding that caused the grant-by-help-key defect now exists in exactly one
+  function, and the tests assert resolved intents instead of grepping source.
+- The Ink layer keeps only what needs terminal geometry: scroll offsets and the
+  both/focused view mode.
+
+Stage 4 therefore adds an intent frame to the transport and runs it through the
+same `reduce`, rather than writing a second set of gates. Two things still gate
+it: the transport must authenticate the writer of an intent, and the snapshot
+must say which renderer is allowed to act, so authority cannot be claimed by
+whichever window happened to connect.
 
 ## Invariants the GUI adds
 

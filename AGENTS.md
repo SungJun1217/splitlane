@@ -76,7 +76,7 @@ These rules are more important than feature convenience:
 8. **No hidden writes.** The active write policy and current writer must always be visible before a prompt is sent.
 9. **No false feature parity.** Provider-native capabilities stay visibly provider-specific; do not imitate them with weaker behavior and present them as equivalent.
 10. **No silent experimental enablement.** Experimental Claude or Codex features require an explicit user action and a visible stability label.
-11. **No authority outside the terminal.** A mirrored snapshot is a view. Until the shared interaction state machine exists, only the TUI may promote a writer, resolve an approval, start a turn, or remove a worktree.
+11. **No authority outside the terminal.** A mirrored snapshot is a view. The interaction state machine is shared (`src/ui/interaction.ts`), but until an authenticated intent channel is approved, only the TUI may promote a writer, resolve an approval, start a turn, or remove a worktree.
 12. **No network surface for the mirror.** The mirror is a local socket in the user state directory with owner-only permissions. It is never a TCP listener and never reachable from another machine.
 13. **No permanent winner assumptions.** Comparative strengths are configurable routing hypotheses, not universal facts. Every recommendation remains visible and overridable.
 
