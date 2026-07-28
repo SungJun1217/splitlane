@@ -84,6 +84,9 @@ export class CompareOrchestrator {
   readonly #git: GitObserver;
   readonly #workspace: WorkspaceGuard;
   #revokeAfterTurn: ProviderId | null = null;
+  /** Set when the pending revocation is a deliberate end of the build cycle, so
+   * the Git baseline is dropped with the lease instead of outliving it. */
+  #endBuildCycleOnRevocation = false;
   #gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   #promotionPending = false;
   #reviewPending = false;
@@ -927,6 +930,10 @@ export class CompareOrchestrator {
     }
     const writer = this.#snapshot.writer;
     if (!writer) return;
+    // Revoking by hand ends the build cycle, so the baseline it carried must go
+    // with it. Only the automatic revocations after a failed or cancelled turn
+    // keep it, which is what lets the next promotion resume the same cycle.
+    this.#endBuildCycleOnRevocation = true;
     const lane = this.#snapshot.lanes[writer];
     if (["STARTING", "RUNNING", "BLOCKED", "CANCELLING"].includes(lane.status)) {
       this.#revokeAfterTurn = writer;
@@ -942,8 +949,13 @@ export class CompareOrchestrator {
     const lease = this.#snapshot.writerLease;
     this.#resolveApprovalsFor(provider, "cancel_turn");
     if (lease) this.#workspace.revoke(lease.id);
-    // The lease is always surrendered here, but the baseline is not: only
-    // finishing or abandoning the review cycle ends it. See promoteWriter.
+    // The lease is always surrendered here. The baseline only goes with it when
+    // the build cycle itself ended: a stale baseline outliving the cycle would
+    // make hand edits look like the next writer's work and pull them into that
+    // writer's review diff. See promoteWriter.
+    const endedCycle = this.#endBuildCycleOnRevocation;
+    if (endedCycle) this.#git.clearBaseline();
+    this.#endBuildCycleOnRevocation = false;
     this.#revokeAfterTurn = null;
     this.#patch({
       mode: "compare",
@@ -952,7 +964,9 @@ export class CompareOrchestrator {
       writerRevoking: false,
       git: this.#git.snapshot,
       review: this.#snapshot.review?.status === "draft" ? null : this.#snapshot.review,
-      notice: `${provider} writer lease revoked; compare mode restored.`,
+      notice: endedCycle
+        ? `${provider} writer lease revoked; compare mode restored and the review baseline was cleared.`
+        : `${provider} writer lease revoked; compare mode restored.`,
     });
   }
 
@@ -1570,8 +1584,15 @@ export class CompareOrchestrator {
       }
       if (!session) {
         session = await adapter.startSession({ projectRoot: workspace.root, requestedModel });
-        if (!current()) return;
+        // Record the handle even when the lane was abandoned while startup was
+        // still running: the session exists either way, and dropping it left the
+        // next dispatch opening a second one beside it.
         this.#sessions.set(provider, session);
+        if (!current()) return;
+      }
+      // Also runs for a reused handle, so the lane stops reporting session "new"
+      // when it picks up a session recorded during an abandoned startup.
+      if (this.#snapshot.lanes[provider].sessionId !== (session.id || null)) {
         this.#patchLane(provider, {
           sessionId: session.id || null,
           effectiveModel: session.effectiveModel,
@@ -1869,8 +1890,17 @@ export class CompareOrchestrator {
       this.#abandonMetaTurn(provider);
       this.#markIsolatedProcess(provider, "idle");
       this.#patchLane(provider, { status: "CANCELLED", turnId: null });
-      this.#patch({ notice: `${provider} was abandoned during startup before a turn began; its CLI process is terminated when Splitlane exits.` });
-      if (this.#snapshot.writer === provider || this.#revokeAfterTurn === provider) this.#completeRevocation(provider);
+      // Abandoning cannot prove the wedged startup will never write, so the
+      // lease goes too. Say so: cancelling a running writer keeps its lease, and
+      // silently dropping it here would leave the next prompt refused with no
+      // explanation of what changed.
+      const losesLease = this.#snapshot.writer === provider || this.#revokeAfterTurn === provider;
+      // Revoke first: #completeRevocation posts its own notice, so the
+      // abandonment message has to be written after it to survive.
+      if (losesLease) this.#completeRevocation(provider);
+      this.#patch({ notice: losesLease
+        ? `${provider} was abandoned during startup before a turn began; its CLI process is terminated when Splitlane exits, and its writer lease was revoked because an abandoned startup cannot be proven idle. Re-grant with ^B to keep building.`
+        : `${provider} was abandoned during startup before a turn began; its CLI process is terminated when Splitlane exits.` });
       void this.#scheduleQueue();
       return;
     }

@@ -682,6 +682,11 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
   }, [inspectorFocused, inspectorShown]);
 
   useInput((input, key) => {
+    // Ink reports Ctrl+<letter> as the bare letter with `key.ctrl` set, so a
+    // branch matching on the letter alone also fires for the Ctrl shortcut that
+    // shares it. Overlay actions therefore compare against `letter`, which is
+    // empty unless the keystroke was an unmodified character.
+    const letter = key.ctrl || key.meta ? "" : input.toLowerCase();
     if (key.ctrl && input === "q") {
       void Promise.allSettled([orchestrator.close(), onBeforeExit?.()]).finally(exit);
       return;
@@ -717,7 +722,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       // The last step grants write authority and starts a paid turn, so it does
       // not share a key with the step before it. Three identical presses used to
       // take a typed line all the way from the composer to a granted lease.
-      else if (input.toLowerCase() === "g" && writerConfirm) {
+      else if (letter === "g" && writerConfirm) {
         void orchestrator.startGuidedBuild(prompt, snapshot.git.dirty).then((started) => {
           if (started) {
             setPrompt("");
@@ -738,10 +743,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       return;
     }
     if (overlay === "queue_offer") {
-      if (input.toLowerCase() === "q" && orchestrator.confirmQueueOffer()) {
+      if (letter === "q" && orchestrator.confirmQueueOffer()) {
         setPrompt("");
         setOverlay(null);
-      } else if (input.toLowerCase() === "c") {
+      } else if (letter === "c") {
         orchestrator.cancelQueueOffer();
         setOverlay(null);
       }
@@ -753,8 +758,8 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       else if (key.downArrow) setQueueIndex((index) => (Math.min(index, count - 1) + 1) % count);
       else {
         const item = snapshot.queue[Math.min(queueIndex, count - 1)] ?? snapshot.queue[0];
-        if (item && input.toLowerCase() === "d") orchestrator.removeQueued(item.id);
-        else if (item && input.toLowerCase() === "c") orchestrator.confirmQueued(item.id);
+        if (item && letter === "d") orchestrator.removeQueued(item.id);
+        else if (item && letter === "c") orchestrator.confirmQueued(item.id);
       }
       return;
     }
@@ -763,15 +768,15 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       return;
     }
     if (overlay === "restore") {
-      if (input.toLowerCase() === "i") setRestoreInspect((value) => !value);
-      else if (input.toLowerCase() === "n") void orchestrator.startNewSessions().then(() => setOverlay(null));
-      else if (input.toLowerCase() === "r" && !destructiveConfirm) setDestructiveConfirm(true);
-      else if (input.toLowerCase() === "r") void orchestrator.restoreSessions().then(() => { setOverlay(null); setDestructiveConfirm(false); });
+      if (letter === "i") setRestoreInspect((value) => !value);
+      else if (letter === "n") void orchestrator.startNewSessions().then(() => setOverlay(null));
+      else if (letter === "r" && !destructiveConfirm) setDestructiveConfirm(true);
+      else if (letter === "r") void orchestrator.restoreSessions().then(() => { setOverlay(null); setDestructiveConfirm(false); });
       return;
     }
     if (overlay === "reset_session") {
-      if (input.toLowerCase() === "r" && !destructiveConfirm) setDestructiveConfirm(true);
-      else if (input.toLowerCase() === "r") void orchestrator.resetSession(snapshot.focusedProvider).then((reset) => { if (reset) setOverlay(null); setDestructiveConfirm(false); });
+      if (letter === "r" && !destructiveConfirm) setDestructiveConfirm(true);
+      else if (letter === "r") void orchestrator.resetSession(snapshot.focusedProvider).then((reset) => { if (reset) setOverlay(null); setDestructiveConfirm(false); });
       return;
     }
     if (overlay === "model") {
@@ -790,7 +795,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       if (key.upArrow) setRoleIndex((index) => (index - 1 + ROLE_IDS.length) % ROLE_IDS.length);
       else if (key.downArrow) setRoleIndex((index) => (index + 1) % ROLE_IDS.length);
       else if (key.tab) setRoleProvider((provider) => provider === "claude" ? "codex" : "claude");
-      else if (input.toLowerCase() === "x") orchestrator.resetRoleHandoffChain();
+      else if (letter === "x") orchestrator.resetRoleHandoffChain();
       else if (key.return) {
         orchestrator.setRole(ROLE_IDS[roleIndex] ?? "scout", roleProvider);
         setOverlay(null);
@@ -810,7 +815,7 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       else if (key.return && !writerConfirm) setWriterConfirm(true);
       // Granting write authority does not share a key with reaching the
       // confirmation, for the same reason as the task-flow gate.
-      else if (input.toLowerCase() === "g" && writerConfirm) {
+      else if (letter === "g" && writerConfirm) {
         void orchestrator.promoteWriter(writerProvider, snapshot.git.dirty).then((promoted) => {
           if (promoted) {
             closeOverlayIfStill("writer");
@@ -833,15 +838,15 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
         // Granting authority is the one decision here that is not fail-closed,
         // so it takes a second deliberate keystroke on the same request. Deny
         // and cancel stay single-key because they only ever withhold authority.
-        if (approval && input.toLowerCase() === "a") {
+        if (approval && letter === "a") {
           if (armedApproval === approval.id) {
             orchestrator.resolveApproval(approval.id, "allow_once");
             setArmedApproval(null);
           } else setArmedApproval(approval.id);
-        } else if (approval && input.toLowerCase() === "d") {
+        } else if (approval && letter === "d") {
           orchestrator.resolveApproval(approval.id, "deny");
           setArmedApproval(null);
-        } else if (approval && input.toLowerCase() === "x") {
+        } else if (approval && letter === "x") {
           orchestrator.resolveApproval(approval.id, "cancel_turn");
           setArmedApproval(null);
         }
@@ -882,10 +887,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       else {
         const finding = snapshot.review?.findings[findingIndex] ?? snapshot.review?.findings[0];
         if (input === " " && finding) orchestrator.toggleFinding(finding.id);
-        else if (input.toLowerCase() === "a" && orchestrator.finishReview("accept")) setOverlay(null);
-        else if (input.toLowerCase() === "e" && orchestrator.finishReview("exit")) setOverlay(null);
-        else if (input.toLowerCase() === "s" && snapshot.review?.stale) setStaleAcknowledged((value) => !value);
-        else if (input.toLowerCase() === "r" && snapshot.review) {
+        else if (letter === "a" && orchestrator.finishReview("accept")) setOverlay(null);
+        else if (letter === "e" && orchestrator.finishReview("exit")) setOverlay(null);
+        else if (letter === "s" && snapshot.review?.stale) setStaleAcknowledged((value) => !value);
+        else if (letter === "r" && snapshot.review) {
           const relay = orchestrator.returnSelectedFindings(staleAcknowledged);
           if (relay) {
             setPrompt(relay);
@@ -911,18 +916,18 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       const lifecycle = snapshot.isolated?.lifecycle;
       if (key.return && lifecycle === "preview") {
         void orchestrator.startIsolated();
-      } else if (input.toLowerCase() === "x" && lifecycle === "preview") {
+      } else if (letter === "x" && lifecycle === "preview") {
         orchestrator.cancelIsolatedPlan();
         setOverlay(null);
-      } else if (input.toLowerCase() === "r" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+      } else if (letter === "r" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
         void orchestrator.refreshIsolated();
-      } else if (input.toLowerCase() === "k" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+      } else if (letter === "k" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
         void orchestrator.retainIsolated();
-      } else if (input.toLowerCase() === "c" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+      } else if (letter === "c" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
         setIsolatedDiscardConfirm(false);
         if (!destructiveConfirm) setDestructiveConfirm(true);
         else void orchestrator.cleanupIsolated().then(() => setDestructiveConfirm(false));
-      } else if (input.toLowerCase() === "d" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
+      } else if (letter === "d" && lifecycle && lifecycle !== "preview" && lifecycle !== "cleaned") {
         setDestructiveConfirm(false);
         if (!isolatedDiscardConfirm) setIsolatedDiscardConfirm(true);
         else {
@@ -934,10 +939,10 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
       }
       return;
     }
-    // The inspector consumes only its own navigation keys. Anything else must
-    // still reach the global handlers below; swallowing every key would disable
-    // help, the approval inbox, and lane cancellation while a read-only panel
-    // happens to hold focus.
+    // The inspector consumes its own navigation keys and every plain text key.
+    // Ctrl/Option shortcuts still reach the global handlers below; swallowing
+    // them too would disable help, the approval inbox, and lane cancellation
+    // while a read-only panel happens to hold focus.
     if (inspectorFocused) {
       if (key.tab) {
         setInspectorFocused(false);
@@ -961,6 +966,11 @@ export function App({ orchestrator, onBeforeExit }: { orchestrator: CompareOrche
         } else orchestrator.showNotice("No changed files to preview. ^E rechecks the working tree.");
         return;
       }
+      // Only the modifier shortcuts continue past the inspector. Text keys must
+      // stop here: falling through appended them to the composer while the user
+      // believed they were navigating a read-only panel, and the Enter that
+      // followed opened the writer-grant gate on a prompt nobody wrote.
+      if (key.return || key.backspace || key.delete || (!key.ctrl && !key.meta && input)) return;
     }
     if (key.tab) {
       if (inspectorShown) {
